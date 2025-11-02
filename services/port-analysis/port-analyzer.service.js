@@ -183,7 +183,15 @@ async function researchExploitsMultiSource(service, version, port, previousConte
   logger.step('Checking known port-based exploits (instant lookup)...');
   const portBasedExploits = checkPortBasedExploits(port);
   if (portBasedExploits.length > 0) {
-    results.exploits.metasploit.push(...portBasedExploits);
+    // Ensure all exploits have the correct structure with string paths
+    const normalizedExploits = portBasedExploits.map(exp => ({
+      ...exp,
+      exploit: exp.exploit || exp.path || exp.name,
+      path: exp.path || exp.exploit || exp.name,
+      name: exp.name || exp.exploit || exp.path,
+      metasploit_module: exp.exploit || exp.path || exp.name,
+    }));
+    results.exploits.metasploit.push(...normalizedExploits);
     logger.info(`  Found ${portBasedExploits.length} known exploit(s) for port ${port}`);
     // If we have high-confidence exploits, we can skip deeper research for speed
     const hasHighConfidence = portBasedExploits.some(e => e.confidence === 'high');
@@ -507,22 +515,60 @@ function extractCVEs(exploits) {
 async function analyzeRCEOpportunities(service, information, exploitResearch, previousContext) {
   const opportunities = [];
 
-  // Check if any exploits can lead to RCE
-  const allExploits = Object.values(exploitResearch.exploits).flat();
+  // First, add port-based Metasploit exploits directly (they're already normalized with string paths)
+  if (exploitResearch.exploits.metasploit && exploitResearch.exploits.metasploit.length > 0) {
+    for (const msfExploit of exploitResearch.exploits.metasploit) {
+      // Ensure we have a string path
+      const modulePath = typeof msfExploit.exploit === 'string' ? msfExploit.exploit :
+                        typeof msfExploit.path === 'string' ? msfExploit.path :
+                        typeof msfExploit.name === 'string' ? msfExploit.name :
+                        null;
+      
+      if (modulePath && (modulePath.startsWith('exploit/') || modulePath.startsWith('auxiliary/'))) {
+        opportunities.push({
+          exploit: modulePath,
+          path: modulePath,
+          name: modulePath,
+          metasploit_module: modulePath,
+          type: 'metasploit_exploit',
+          confidence: msfExploit.confidence || 'high',
+          method: 'metasploit',
+          source: 'metasploit',
+          description: msfExploit.description || `${modulePath} - known RCE exploit`,
+        });
+      }
+    }
+  }
+
+  // Check if any other exploits can lead to RCE
+  const allExploits = Object.values(exploitResearch.exploits).flat()
+    .filter(exp => !exp.path || (!exp.path.startsWith('exploit/') && !exp.path.startsWith('auxiliary/')));
   
   for (const exploit of allExploits) {
     // Check if exploit mentions RCE, command execution, shell, etc.
-    const exploitText = (exploit.title || exploit.description || exploit.name || '').toLowerCase();
+    const exploitText = (exploit.title || exploit.description || exploit.name || exploit.path || '').toLowerCase();
     const rceKeywords = ['rce', 'remote code execution', 'command execution', 'shell', 'meterpreter', 'backdoor', 'arbitrary code'];
     
     if (rceKeywords.some(keyword => exploitText.includes(keyword))) {
-      opportunities.push({
-        exploit,
-        type: 'known_exploit',
-        confidence: 'high',
-        method: exploit.source === 'metasploit' ? 'metasploit' : 'manual',
-        source: exploit.source,
-      });
+      // Extract module path as string
+      const modulePath = typeof exploit.path === 'string' ? exploit.path :
+                        typeof exploit.name === 'string' ? exploit.name :
+                        typeof exploit.title === 'string' ? exploit.title :
+                        null;
+      
+      if (modulePath) {
+        opportunities.push({
+          exploit: modulePath,  // Store as string, not object
+          path: modulePath,
+          name: modulePath,
+          metasploit_module: modulePath.startsWith('exploit/') || modulePath.startsWith('auxiliary/') ? modulePath : null,
+          type: 'known_exploit',
+          confidence: 'high',
+          method: exploit.source === 'metasploit' || modulePath.startsWith('exploit/') || modulePath.startsWith('auxiliary/') ? 'metasploit' : 'manual',
+          source: exploit.source || 'metasploit',
+          description: exploit.description || exploit.title || '',
+        });
+      }
     }
   }
 
@@ -559,14 +605,19 @@ function checkServiceRCEOpportunities(service, information, previousContext) {
   };
 
   for (const [key, info] of Object.entries(vulnerableServices)) {
-    if (serviceName.includes(key)) {
+    if (serviceName.includes(key) && info.versionMatch) {
+      const modulePath = info.exploit; // Already a string
       opportunities.push({
         type: 'service_backdoor',
         service: key,
-        exploit: info.exploit,
+        exploit: modulePath,  // String path
+        path: modulePath,
+        name: modulePath,
+        metasploit_module: modulePath,
         description: info.description,
         confidence: 'high',
         method: 'metasploit',
+        source: 'metasploit',
       });
     }
   }
