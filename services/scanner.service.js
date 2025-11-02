@@ -691,5 +691,6 @@ module.exports = {
   attemptRCE,
   runFullScan,
   executeMetasploitExploit,
+  getLocalIP,
 };
 
