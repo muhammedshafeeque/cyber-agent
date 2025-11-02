@@ -14,33 +14,33 @@ async function initializeGraph() {
   }
 }
 
-function getDB() {
+async function getDB() {
   if (!db) {
-    throw new Error('Database not initialized. Call initializeGraph() first.');
+    await initializeGraph();
   }
   return db;
 }
 
 async function createDocument(collectionName, document) {
-  const database = getDB();
+  const database = await getDB();
   const collection = database.collection(collectionName);
   return await collection.save(document);
 }
 
 async function getDocument(collectionName, key) {
-  const database = getDB();
+  const database = await getDB();
   const collection = database.collection(collectionName);
   return await collection.document(key);
 }
 
 async function queryAQL(query, bindVars = {}) {
-  const database = getDB();
+  const database = await getDB();
   const cursor = await database.query(query, bindVars);
   return await cursor.all();
 }
 
 async function createEdge(edgeCollectionName, fromId, toId, data = {}) {
-  const database = getDB();
+  const database = await getDB();
   const edgeCollection = database.collection(edgeCollectionName);
   return await edgeCollection.save({
     _from: fromId,

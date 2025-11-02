@@ -156,9 +156,8 @@ async function ensureGraph(db) {
         },
       ];
 
-      await db.createGraph(graphName, {
-        edgeDefinitions,
-      });
+      const graph = db.graph(graphName);
+      await graph.create(edgeDefinitions);
       console.log(`Graph ${graphName} created.`);
     }
   } catch (error) {
@@ -173,12 +172,22 @@ async function createIndexes(db) {
     for (const collectionName of collections) {
       const collection = db.collection(collectionName);
       try {
-        await collection.ensureIndex({
-          type: 'fulltext',
-          fields: ['name', 'description'],
-          minLength: 3,
-        });
-        console.log(`Full-text index created on ${collectionName}.`);
+        // Create separate fulltext indexes for each field (ArangoDB requirement)
+        try {
+          await collection.ensureIndex({
+            type: 'fulltext',
+            fields: ['name'],
+            minLength: 3,
+          });
+        } catch (e) {}
+        try {
+          await collection.ensureIndex({
+            type: 'fulltext',
+            fields: ['description'],
+            minLength: 3,
+          });
+        } catch (e) {}
+        console.log(`Full-text indexes created on ${collectionName}.`);
       } catch (error) {
         // Index might already exist
         if (!error.message.includes('already exists')) {
