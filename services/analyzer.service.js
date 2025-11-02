@@ -1,7 +1,15 @@
 const { chat, analyzeImage } = require('../config/mistral.config');
 const toolParser = require('./tools/tool-parser.service');
 const fs = require('fs-extra');
-const sharp = require('sharp');
+// Sharp is optional - only needed for advanced image processing
+// Making it optional to avoid native dependency issues
+let sharp = null;
+try {
+  sharp = require('sharp');
+} catch (error) {
+  // Sharp not available, will use basic image reading
+  console.warn('Sharp not available - basic image support only');
+}
 
 async function analyzeOutput(toolName, output, options = {}) {
   try {
