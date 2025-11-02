@@ -1,5 +1,6 @@
 const { chat, analyzeImage } = require('../config/mistral.config');
 const toolParser = require('./tools/tool-parser.service');
+const logger = require('../cli/utils/logger');
 const fs = require('fs-extra');
 // Sharp is optional - only needed for advanced image processing
 // Making it optional to avoid native dependency issues

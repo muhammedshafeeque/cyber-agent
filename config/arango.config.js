@@ -247,8 +247,10 @@ async function ensureGraph(db) {
       }
 
       const graph = db.graph(graphName);
-      // Use proper format for graph creation - edgeDefinitions as first parameter
-      await graph.create(edgeDefinitions);
+      // Use proper format for graph creation - pass edgeDefinitions as an object
+      await graph.create({
+        edgeDefinitions: edgeDefinitions
+      });
       console.log(`Graph ${graphName} created.`);
     }
   } catch (error) {
