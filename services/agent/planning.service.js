@@ -43,9 +43,10 @@ Format as JSON with phases array containing: phase_name, description, tools_need
 
 function parsePlanResponse(response) {
   try {
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+    const { parseAIJSON } = require('../utils/json-utils');
+    const parsed = parseAIJSON(response);
+    if (parsed) {
+      return parsed;
     }
 
     // Fallback: create plan from text
@@ -126,9 +127,10 @@ Format as JSON:
       },
     ]);
 
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+    const { parseAIJSON } = require('../utils/json-utils');
+    const parsed = parseAIJSON(response);
+    if (parsed) {
+      return parsed;
     }
 
     return {
@@ -138,7 +140,7 @@ Format as JSON:
         tool: 'metasploit',
         action: 'Exploit',
       })),
-      explanation: response,
+      explanation: response.substring(0, 1000),
     };
   } catch (error) {
     console.error('Error building attack chain:', error);

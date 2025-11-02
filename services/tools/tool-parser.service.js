@@ -187,9 +187,25 @@ ${output.substring(0, 5000)}`; // Limit output size
     });
 
     // Try to extract JSON from response
+    const { parseAIJSON } = require('../utils/json-utils');
+    const parsed = parseAIJSON(response);
+    if (parsed) {
+      return parsed;
+    }
+    
+    // Fallback: try direct match
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+      try {
+        const cleaned = jsonMatch[0]
+          .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+          .replace(/\n/g, '\\n')
+          .replace(/\r/g, '\\r')
+          .replace(/\t/g, '\\t');
+        return JSON.parse(cleaned);
+      } catch (e) {
+        // Continue to fallback
+      }
     }
 
     // Fallback: return raw output with basic structure

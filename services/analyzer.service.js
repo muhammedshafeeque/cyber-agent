@@ -135,9 +135,25 @@ ${output.substring(0, 4000)}`;
       maxTokens: 2000,
     });
 
+    const { parseAIJSON } = require('./utils/json-utils');
+    const parsed = parseAIJSON(response);
+    if (parsed && Array.isArray(parsed)) {
+      return parsed;
+    }
+    
+    // Try array format
     const jsonMatch = response.match(/\[[\s\S]*\]/);
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+      try {
+        const cleaned = jsonMatch[0]
+          .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+          .replace(/\n/g, '\\n')
+          .replace(/\r/g, '\\r')
+          .replace(/\t/g, '\\t');
+        return JSON.parse(cleaned);
+      } catch (e) {
+        // Continue to return empty array
+      }
     }
 
     return [];

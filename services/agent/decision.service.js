@@ -78,10 +78,11 @@ Format your response as JSON with keys: action, reasoning, tools (array), nextPh
 
 function parseDecisionResponse(response) {
   try {
-    // Try to extract JSON from response
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+    // Use utility function for JSON parsing
+    const { parseAIJSON } = require('../utils/json-utils');
+    const parsed = parseAIJSON(response);
+    if (parsed) {
+      return parsed;
     }
     
     // Fallback: parse text response
@@ -93,12 +94,14 @@ function parseDecisionResponse(response) {
       priority: extractPriority(response),
     };
   } catch (error) {
-    console.error('Error parsing decision response:', error);
+    console.error('Error parsing decision response:', error.message);
+    // Fallback to text parsing
     return {
-      action: 'continue',
-      reasoning: response,
-      tools: [],
-      priority: 'medium',
+      action: extractAction(response),
+      reasoning: response.substring(0, 500), // Limit length
+      tools: extractTools(response),
+      nextPhase: extractPhase(response),
+      priority: extractPriority(response),
     };
   }
 }
@@ -203,9 +206,10 @@ Respond with JSON: {"tools": ["tool1", "tool2"], "reasoning": "..."}`;
       },
     ]);
 
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+    const { parseAIJSON } = require('../utils/json-utils');
+    const parsed = parseAIJSON(response);
+    if (parsed) {
+      return parsed;
     }
 
     return { tools: [], reasoning: response };
@@ -238,14 +242,15 @@ Respond with JSON: {"shouldContinue": true/false, "recommendation": "..."}`;
       },
     ]);
 
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+    const { parseAIJSON } = require('../utils/json-utils');
+    const parsed = parseAIJSON(response);
+    if (parsed) {
+      return parsed;
     }
 
     return {
       shouldContinue: !agentState.rceAchieved && agentState.currentStep < 50,
-      recommendation: response,
+      recommendation: response.substring(0, 500),
     };
   } catch (error) {
     console.error('Error analyzing state:', error);
