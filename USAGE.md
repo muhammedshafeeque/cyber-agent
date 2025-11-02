@@ -49,11 +49,21 @@ node bin/cyber-agent init
 #### Run Autonomous Penetration Test
 
 ```bash
-# Basic test with RCE goal (default)
+# Test with URL
 node bin/cyber-agent test http://example.com
+node bin/cyber-agent test https://example.com
+
+# Test with IP address
+node bin/cyber-agent test 192.168.1.1
+node bin/cyber-agent test 10.0.0.1
+
+# Test with hostname
+node bin/cyber-agent test example.com
+node bin/cyber-agent test subdomain.example.com
 
 # Test with specific goal
 node bin/cyber-agent test http://example.com --goal rce
+node bin/cyber-agent test 192.168.1.1 --goal rce
 
 # Test using only Kali Linux tools
 node bin/cyber-agent test http://example.com --kali-only
@@ -62,6 +72,11 @@ node bin/cyber-agent test http://example.com --kali-only
 node bin/cyber-agent test http://example.com --interactive
 ```
 
+**Note**: The tool automatically handles:
+- **IP addresses** (e.g., `192.168.1.1`) - Uses for network scanning (nmap)
+- **URLs** (e.g., `http://example.com`) - Uses for web scanning (sqlmap, nikto)
+- **Hostnames** (e.g., `example.com`) - Automatically normalized
+
 **What it does:**
 - Performs reconnaissance (nmap scan)
 - Discovers vulnerabilities
@@ -69,9 +84,16 @@ node bin/cyber-agent test http://example.com --interactive
 - Attempts to achieve Remote Code Execution (RCE)
 - Stores findings in knowledge graph
 
-**Example:**
+**Examples:**
 ```bash
+# Test a web application by URL
 node bin/cyber-agent test https://testphp.vulnweb.com --goal rce
+
+# Test a server by IP address
+node bin/cyber-agent test 192.168.1.100 --goal rce
+
+# Test a hostname
+node bin/cyber-agent test scanme.nmap.org
 ```
 
 ---

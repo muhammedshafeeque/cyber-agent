@@ -8,7 +8,7 @@ const command = new Command('test');
 
 command
   .description('Run autonomous security test with RCE goal')
-  .argument('<target>', 'Target URL or IP address')
+  .argument('<target>', 'Target URL (e.g., http://example.com) or IP address (e.g., 192.168.1.1)')
   .option('--goal <goal>', 'Primary goal (default: rce)', 'rce')
   .option('--kali-only', 'Use only Kali Linux tools', false)
   .option('--interactive', 'Enable AI-guided manual steps', false)

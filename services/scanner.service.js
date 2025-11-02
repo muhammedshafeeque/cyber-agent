@@ -4,10 +4,15 @@ const analyzer = require('./analyzer.service');
 const exploitGenerator = require('./exploit/exploit-generator.service');
 const { createDocument, createEdge } = require('./graph.service');
 const { createScan, createVulnerability, createApplication } = require('../models/graph.models');
+const { getIPAddress, getHostname, normalizeTarget, isWebTarget } = require('./utils/target-utils');
 
 async function runReconnaissance(target) {
   try {
     console.log(`[Scanner] Starting reconnaissance on ${target}`);
+    
+    // Normalize target - handle both IP addresses and URLs
+    const ipAddress = getIPAddress(target);
+    const hostname = getHostname(target);
 
     // Ensure nmap is available
     const nmapStatus = await toolRegistry.ensureToolAvailable('nmap');
@@ -15,8 +20,8 @@ async function runReconnaissance(target) {
       throw new Error('nmap not available and could not be installed');
     }
 
-    // Run nmap scan
-    const scanResult = await toolExecutor.executeNmap(target, {
+    // Run nmap scan (works with IP addresses or hostnames)
+    const scanResult = await toolExecutor.executeNmap(ipAddress || hostname, {
       ports: '1-1000', // Initial scan of common ports
       serviceVersion: true,
     });
@@ -56,8 +61,18 @@ async function runVulnerabilityScans(target, toolNames = []) {
   const results = [];
 
   try {
+    // Normalize target for different tool types
+    const ipAddress = getIPAddress(target);
+    const hostname = getHostname(target);
+    const webURL = isWebTarget(target) ? normalizeTarget(target) : null;
+    
     // Default tools if none specified
-    const tools = toolNames.length > 0 ? toolNames : ['nikto', 'sqlmap'];
+    // For IP addresses, skip web-specific tools unless we detect web services
+    let defaultTools = ['nikto'];
+    if (webURL || isWebTarget(target)) {
+      defaultTools.push('sqlmap');
+    }
+    const tools = toolNames.length > 0 ? toolNames : defaultTools;
 
     for (const toolName of tools) {
       // Ensure tool is available
@@ -72,23 +87,33 @@ async function runVulnerabilityScans(target, toolNames = []) {
       let scanResult;
       switch (toolName.toLowerCase()) {
         case 'nmap':
-          scanResult = await toolExecutor.executeNmap(target, {
+          // Nmap works with IP addresses or hostnames
+          scanResult = await toolExecutor.executeNmap(ipAddress || hostname, {
             ports: '1-65535',
             serviceVersion: true,
           });
           break;
         case 'nikto':
-          scanResult = await toolExecutor.executeNikto(target);
+          // Nikto works with IP addresses or URLs
+          const niktoTarget = webURL || `http://${ipAddress || hostname}`;
+          scanResult = await toolExecutor.executeNikto(niktoTarget);
           break;
         case 'sqlmap':
-          // Extract URL from target or use as-is
-          scanResult = await toolExecutor.executeSqlmap(target, {
-            forms: true,
-          });
+          // Sqlmap needs a URL - use normalized URL or construct from IP
+          if (webURL) {
+            scanResult = await toolExecutor.executeSqlmap(webURL, {
+              forms: true,
+            });
+          } else {
+            // Skip sqlmap if no URL available
+            console.log(`[Scanner] Skipping ${toolName} - requires URL, got IP address`);
+            continue;
+          }
           break;
         default:
-          // Generic execution
-          scanResult = await toolExecutor.executeTool(toolName, [target]);
+          // Generic execution - use IP/hostname for network tools, URL for web tools
+          const toolTarget = isWebTarget(toolName) ? (webURL || `http://${ipAddress || hostname}`) : (ipAddress || hostname);
+          scanResult = await toolExecutor.executeTool(toolName, [toolTarget]);
       }
 
       if (scanResult.success || scanResult.output) {
