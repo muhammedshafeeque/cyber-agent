@@ -63,7 +63,7 @@ node bin/cyber-agent test subdomain.example.com
 
 # Test with specific goal
 node bin/cyber-agent test http://example.com --goal rce
-node bin/cyber-agent test 192.168.1.1 --goal rce
+
 
 # Test using only Kali Linux tools
 node bin/cyber-agent test http://example.com --kali-only
