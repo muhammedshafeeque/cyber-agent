@@ -25,12 +25,21 @@ async function analyzeOutput(toolName, output, options = {}) {
     // Identify RCE opportunities
     const rceOpportunities = await identifyRCEOpportunities(vulnerabilities, parsed);
     
+    // Normalize parsed data to ensure consistent format
+    const normalizedParsed = {
+      ...parsed,
+      ports: parsed.ports || parsed.openPorts?.map(p => p.port) || [],
+      services: parsed.services || [],
+    };
+    
     return {
       tool: toolName,
-      parsed,
+      parsed: normalizedParsed,
       vulnerabilities,
       attackSurfaces,
       rceOpportunities,
+      ports: normalizedParsed.ports,
+      services: normalizedParsed.services,
       summary: generateSummary(vulnerabilities, attackSurfaces, rceOpportunities),
     };
   } catch (error) {
@@ -75,6 +84,44 @@ async function extractVulnerabilities(parsedData, toolName) {
 
 async function identifyServiceVulnerabilities(service) {
   const vulnerabilities = [];
+
+  // Metasploitable-specific vulnerable services (high priority for RCE)
+  const metasploitableExploits = {
+    'vsftpd 2.3.4': { type: 'backdoor', cve: 'CVE-2011-2523', exploit: 'exploit/unix/ftp/vsftpd_234_backdoor', rce: true },
+    'OpenSSH 4.7p1': { type: 'weak_keys', exploit: 'exploit/multi/ssh/sshexec', rce: true },
+    'distcc': { type: 'command_execution', cve: 'CVE-2004-2687', exploit: 'exploit/unix/misc/distcc_exec', rce: true },
+    'UnrealIRCd': { type: 'backdoor', cve: 'CVE-2010-2075', exploit: 'exploit/unix/irc/unreal_ircd_3281_backdoor', rce: true },
+    'proftpd': { type: 'backdoor', cve: 'CVE-2011-4157', exploit: 'exploit/unix/ftp/proftpd_133c_backdoor', rce: true },
+    'ingreslock': { type: 'command_execution', exploit: 'exploit/unix/misc/distcc_exec', rce: true },
+    'rlogin': { type: 'weak_auth', exploit: 'auxiliary/scanner/rservices/rlogin_login', rce: false },
+    'rexec': { type: 'weak_auth', exploit: 'exploit/multi/samba/usermap_script', rce: true },
+    'rsh': { type: 'weak_auth', exploit: 'exploit/multi/samba/usermap_script', rce: true },
+  };
+
+  // Check if service matches known vulnerable pattern
+  const serviceName = (service.name || '').toLowerCase();
+  const serviceVersion = (service.version || '').toLowerCase();
+  const serviceKey = `${serviceName} ${serviceVersion}`.trim();
+  
+  for (const [key, vuln] of Object.entries(metasploitableExploits)) {
+    if (serviceKey.includes(key.toLowerCase()) || serviceName.includes(key.toLowerCase())) {
+      vulnerabilities.push({
+        type: vuln.type || 'known_vulnerability',
+        description: `Known ${vuln.type} in ${service.name || serviceName} - ${vuln.cve || 'exploit available'}`,
+        severity: 'critical',
+        service: service.name || serviceName,
+        port: service.port,
+        version: service.version,
+        cve: vuln.cve,
+        exploit: vuln.exploit,
+        metasploit_module: vuln.exploit,
+        canLeadToRCE: vuln.rce || false,
+        confidence: 'high',
+      });
+      
+      logger.info(`Identified vulnerable service: ${service.name} - ${vuln.exploit}`);
+    }
+  }
 
   // Common vulnerable services/versions
   const vulnerableVersions = {

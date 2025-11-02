@@ -36,33 +36,57 @@ async function parseToolOutput(toolName, output, format = 'auto') {
 }
 
 function parseNmapOutput(output) {
+  // Enhanced parsing for Metasploitable detection
   const result = {
     openPorts: [],
     services: [],
     hosts: [],
   };
 
-  // Extract open ports
-  const portRegex = /(\d+)\/(tcp|udp)\s+open\s+(\w+)/g;
+  // Enhanced nmap parsing - multiple patterns to catch different formats
+  // Pattern 1: Standard port/service line: "21/tcp   open  ftp     vsftpd 2.3.4"
+  const portServiceRegex = /(\d+)\/(tcp|udp)\s+open\s+(\S+)\s*(.*?)(?:\n|$)/g;
   let match;
-  while ((match = portRegex.exec(output)) !== null) {
+  while ((match = portServiceRegex.exec(output)) !== null) {
+    const port = parseInt(match[1]);
+    const service = match[3];
+    const version = (match[4] || '').trim();
+    
     result.openPorts.push({
-      port: parseInt(match[1]),
+      port: port,
       protocol: match[2],
       state: 'open',
-      service: match[3],
+      service: service,
     });
-  }
-
-  // Extract service versions
-  const versionRegex = /(\d+)\/(tcp|udp)\s+open\s+(\w+)\s+(.+?)(?:\n|$)/g;
-  while ((match = versionRegex.exec(output)) !== null) {
+    
+    // Also add to services with version info
     result.services.push({
-      port: parseInt(match[1]),
-      service: match[3],
-      version: match[4].trim(),
+      port: port,
+      name: service,
+      service: service,
+      version: version,
     });
   }
+  
+  // Pattern 2: More detailed version detection lines
+  const versionRegex = /(\d+)\/(tcp|udp)\s+open\s+(\S+)\s+(\S+.*?)(?:\n|$)/g;
+  while ((match = versionRegex.exec(output)) !== null) {
+    const port = parseInt(match[1]);
+    const existingService = result.services.find(s => s.port === port);
+    if (!existingService) {
+      result.services.push({
+        port: port,
+        name: match[3],
+        service: match[3],
+        version: match[4].trim(),
+      });
+    } else {
+      existingService.version = match[4].trim();
+    }
+  }
+  
+  // Normalize: ensure ports array matches services
+  result.ports = [...new Set(result.openPorts.map(p => p.port))];
 
   // Extract hosts
   const hostRegex = /Nmap scan report for (.+)/g;

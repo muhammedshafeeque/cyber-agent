@@ -197,13 +197,40 @@ class AutonomousAgent {
         break; // Found results, stop
       }
       
-      // No results, try deeper scan
-      if (attemptNumber < maxAttempts - 1) {
-        logger.warn('No vulnerabilities found - escalating to deeper scan...');
-        previousScanResults = currentResults;
+      // No vulnerabilities found - but check if we should stop scanning and analyze deeper
+      if (attemptNumber === 0 && currentResults.length > 0) {
+        // Even if no explicit vulnerabilities, analyze services for exploitation
+        logger.step('No explicit vulnerabilities found, but analyzing services for RCE opportunities...');
+        const { identifyServiceExploits } = require('../exploit/exploit-analyzer.service');
+        const serviceExploits = await identifyServiceExploits(currentResults, this.state.target);
+        
+        if (serviceExploits.length > 0) {
+          logger.success(`Found ${serviceExploits.length} RCE opportunity(ies) from service analysis`);
+          serviceExploits.forEach(exp => {
+            this.state.addVulnerability({
+              type: 'rce_opportunity',
+              description: exp.explanation,
+              severity: 'critical',
+              exploit: exp.exploit,
+              metasploit_module: exp.metasploit_module,
+              port: exp.port,
+              service: exp.service,
+            });
+          });
+          break; // Found opportunities, stop scanning and exploit
+        }
       }
       
-      attemptNumber++;
+      // No results, try deeper scan only if we haven't tried already
+      if (attemptNumber < maxAttempts - 1 && !this.state.discoveredVulnerabilities.some(v => v.exploit)) {
+        logger.warn('No vulnerabilities found - escalating to deeper scan...');
+        previousScanResults = currentResults;
+        attemptNumber++;
+      } else {
+        // Already tried or found something, stop scanning
+        logger.info('Stopping scan attempts - moving to exploitation');
+        break;
+      }
     }
     
     logger.separator();
@@ -218,22 +245,77 @@ class AutonomousAgent {
 
     this.state.addScanResult(vulnResults);
     
-    // Extract vulnerabilities
+    // Deep analysis: Extract vulnerabilities AND identify RCE opportunities
     logger.step('Analyzing scan results for vulnerabilities...');
     const vulnerabilities = await this.extractVulnerabilities(vulnResults);
     
-    if (vulnerabilities.length > 0) {
-      logger.success(`Found ${vulnerabilities.length} vulnerability(ies):`);
+    // Deep RCE analysis - analyze ALL scan results, not just recent ones
+    logger.step('Performing deep RCE exploitation analysis on all scan results...');
+    const { analyzeForRCE, identifyServiceExploits } = require('../exploit/exploit-analyzer.service');
+    
+    // Analyze all scan results for RCE opportunities
+    const allScanResults = this.state.scanResults;
+    const rceOpportunities = await analyzeForRCE(allScanResults.length > 0 ? allScanResults : vulnResults, this.state.target);
+    
+    // Also identify exploits from discovered services (even if no explicit vulnerabilities)
+    logger.step('Identifying exploits from discovered services...');
+    const serviceExploits = await identifyServiceExploits(allScanResults.length > 0 ? allScanResults : vulnResults, this.state.target);
+    
+    // Combine all RCE opportunities
+    const allRCEOpportunities = [...rceOpportunities, ...serviceExploits];
+    
+    if (vulnerabilities.length > 0 || allRCEOpportunities.length > 0) {
+      logger.success(`Found ${vulnerabilities.length} vulnerability(ies) and ${allRCEOpportunities.length} RCE opportunity(ies)`);
+      
+      // Add vulnerabilities
       vulnerabilities.forEach(v => {
         logger.vulnerability(v);
         this.state.addVulnerability(v);
       });
-      logger.step('Moving to research phase to gather exploit information...');
-      this.state.setPhase('research');
+      
+      // Add RCE opportunities as high-priority vulnerabilities (prioritize these!)
+      allRCEOpportunities.forEach(opp => {
+        logger.success(`  [RCE OPPORTUNITY] ${opp.service || opp.type} on port ${opp.port}`);
+        logger.info(`    Exploit: ${opp.exploit || opp.metasploit_module || 'custom'}`);
+        logger.info(`    Confidence: ${opp.confidence}`);
+        if (opp.steps && opp.steps.length > 0) {
+          logger.step(`    Steps: ${opp.steps[0]}${opp.steps.length > 1 ? '...' : ''}`);
+        }
+        
+        this.state.addVulnerability({
+          type: opp.type || 'rce_opportunity',
+          description: opp.explanation || `RCE opportunity via ${opp.service}`,
+          severity: 'critical',
+          service: opp.service,
+          port: opp.port,
+          exploit: opp.exploit || opp.metasploit_module,
+          cve: opp.cve,
+          confidence: opp.confidence,
+          steps: opp.steps,
+          metasploit_module: opp.metasploit_module,
+        });
+      });
+      
+      // If we have RCE opportunities, go straight to exploitation - DON'T KEEP SCANNING!
+      if (allRCEOpportunities.length > 0 && this.state.rceGoal) {
+        logger.success(`🎯 ${allRCEOpportunities.length} RCE opportunity(ies) found - moving directly to exploitation phase`);
+        logger.warn('Stopping further scans - focusing on exploitation');
+        this.state.setPhase('exploitation');
+      } else if (vulnerabilities.length > 0) {
+        logger.step('Moving to research phase to gather exploit information...');
+        this.state.setPhase('research');
+      }
     } else {
-      logger.info('No vulnerabilities found in this scan.');
-      logger.step('Moving to analysis phase...');
-      this.state.setPhase('analysis');
+      logger.info('No vulnerabilities or RCE opportunities found in this scan.');
+      
+      // If we've done multiple scans with no results, stop looping
+      if (this.state.currentStep > 5) {
+        logger.warn('Multiple scans completed with no findings - stopping scan loop');
+        this.state.setPhase('complete');
+      } else {
+        logger.step('Moving to analysis phase...');
+        this.state.setPhase('analysis');
+      }
     }
     
     this.state.incrementStep();
@@ -325,22 +407,69 @@ class AutonomousAgent {
   async exploitationPhase() {
     logger.phase('EXPLOITATION', 'Attempting RCE');
     
+    // Prioritize vulnerabilities with known exploits and RCE opportunities
     const vulnerabilities = this.state.discoveredVulnerabilities.filter(v => 
-      this.canLeadToRCE(v)
+      this.canLeadToRCE(v) || v.exploit || v.metasploit_module
     );
+    
+    // Sort by confidence and exploit availability
+    vulnerabilities.sort((a, b) => {
+      if (a.metasploit_module && !b.metasploit_module) return -1;
+      if (b.metasploit_module && !a.metasploit_module) return 1;
+      if (a.confidence === 'high' && b.confidence !== 'high') return -1;
+      if (b.confidence === 'high' && a.confidence !== 'high') return 1;
+      return 0;
+    });
     
     if (vulnerabilities.length === 0) {
       logger.warn('No RCE-capable vulnerabilities found for exploitation.');
+      logger.step('Re-analyzing scan results for missed opportunities...');
+      
+      // Try deep analysis again on latest scan results
+      const latestScans = this.state.scanResults.slice(-3); // Last 3 scans
+      if (latestScans.length > 0) {
+        const { analyzeForRCE } = require('../exploit/exploit-analyzer.service');
+        const newOpportunities = await analyzeForRCE(latestScans, this.state.target);
+        
+        if (newOpportunities.length > 0) {
+          logger.success(`Found ${newOpportunities.length} additional RCE opportunity(ies) from deep analysis`);
+          newOpportunities.forEach(opp => {
+            this.state.addVulnerability({
+              type: opp.type,
+              description: opp.explanation,
+              severity: 'critical',
+              exploit: opp.exploit,
+              metasploit_module: opp.metasploit_module,
+              port: opp.port,
+              service: opp.service,
+            });
+          });
+          // Retry exploitation with new opportunities
+          return await this.exploitationPhase();
+        }
+      }
+      
       this.state.setPhase('analysis');
       this.state.incrementStep();
       return;
     }
     
-    logger.info(`Attempting exploitation on ${vulnerabilities.length} vulnerability(ies)...`);
+    logger.info(`Attempting exploitation on ${vulnerabilities.length} vulnerability(ies) (prioritized by exploit availability)...`);
     
     for (let i = 0; i < vulnerabilities.length; i++) {
       const vuln = vulnerabilities[i];
-      logger.tool('Exploit', `Attempting RCE via ${vuln.type}`, `(${i + 1}/${vulnerabilities.length})`);
+      
+      logger.tool('Exploit', `Attempting RCE via ${vuln.type || vuln.service}`, 
+        vuln.metasploit_module ? `(${i + 1}/${vulnerabilities.length}) - Metasploit: ${vuln.metasploit_module}` : 
+        `(${i + 1}/${vulnerabilities.length})`);
+      
+      // Show exploitation steps if available
+      if (vuln.steps && vuln.steps.length > 0) {
+        logger.info(`Exploitation steps:`);
+        vuln.steps.forEach((step, idx) => {
+          logger.step(`  ${idx + 1}. ${step}`);
+        });
+      }
       
       if (this.state.rceGoal) {
         const exploitResult = await scannerService.attemptRCE(this.state.target, vuln);
@@ -352,12 +481,19 @@ class AutonomousAgent {
           break;
         } else {
           logger.warn(`Exploitation attempt ${i + 1} failed: ${exploitResult.error || 'Unknown error'}`);
+          
+          // Learn from failure and adapt
+          if (vuln.metasploit_module && exploitResult.error) {
+            logger.step('Trying alternative exploitation method...');
+            // Could try different payload or exploit variant here
+          }
         }
       }
     }
 
     if (!this.state.rceAchieved) {
       logger.info('RCE not achieved in this phase.');
+      logger.step('Reviewing results for additional exploitation paths...');
     }
     
     logger.step('Moving to analysis phase...');
