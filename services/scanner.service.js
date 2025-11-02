@@ -63,7 +63,11 @@ async function runReconnaissance(target) {
     }
     
     // Check if we got results
-    const parsed = await analyzer.analyzeOutput('nmap', scanResult.output || scanResult.stdout);
+    let parsed = scanResult.parsed;
+    if (!parsed) {
+      logger.step('Parsing nmap output...');
+      parsed = await analyzer.analyzeOutput('nmap', scanResult.output || scanResult.stdout);
+    }
     
     // If quick scan found services, we're good. Otherwise escalate
     if (!parsed.ports || parsed.ports.length === 0) {
@@ -73,18 +77,12 @@ async function runReconnaissance(target) {
       const deepResult = await toolExecutor.executeNmap(ipAddress || hostname, mediumProfile.nmap);
       // Use deep scan results if available
       if (deepResult.success || deepResult.output) {
+        const deepParsed = await analyzer.analyzeOutput('nmap', deepResult.output || deepResult.stdout);
         return {
           ...deepResult,
-          parsed: await analyzer.analyzeOutput('nmap', deepResult.output || deepResult.stdout),
+          parsed: deepParsed,
         };
       }
-    }
-
-    // Parse results (already done above if we escalated)
-    let parsed = scanResult.parsed;
-    if (!parsed) {
-      logger.step('Parsing nmap output...');
-      parsed = await analyzer.analyzeOutput('nmap', scanResult.output || scanResult.stdout);
     }
 
     // Learn from scan result
