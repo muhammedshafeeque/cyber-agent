@@ -75,8 +75,13 @@ command
           }
           
           if (report.rceAchieved) {
-            displaySuccess('🎯 Remote Code Execution achieved!');
-            console.log(chalk.green('\nInteractive shell available - check Metasploit sessions'));
+            displaySuccess('\n🎯🎯🎯 REMOTE CODE EXECUTION ACHIEVED! 🎯🎯🎯');
+            console.log(chalk.green('\nMetasploit session is active and running'));
+            console.log(chalk.cyan('To access your shell:'));
+            console.log(chalk.white('  msfconsole'));
+            console.log(chalk.white('  sessions -l          # List active sessions'));
+            console.log(chalk.white('  sessions -i 1        # Interact with session 1'));
+            console.log(chalk.gray('\nPenetration test stopped - objective complete!'));
           }
         } else {
           console.log(chalk.cyan(`Achieved: ${report.achieved ? chalk.green('Yes') : chalk.red('No')}`));
