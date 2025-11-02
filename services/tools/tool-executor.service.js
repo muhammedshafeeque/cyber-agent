@@ -161,6 +161,13 @@ async function executeWithStream(toolName, executable, args, options = {}) {
 async function executeNmap(target, options = {}) {
   const args = [];
   
+  // Scan type (default to SYN scan for speed)
+  if (options.scanType) {
+    args.push(options.scanType);
+  } else {
+    args.push('-sS'); // SYN scan by default (fastest)
+  }
+  
   if (options.ports) {
     args.push(`-p`);
     args.push(options.ports);
@@ -175,11 +182,35 @@ async function executeNmap(target, options = {}) {
   if (options.script) {
     args.push(`--script`);
     args.push(options.script);
+  } else if (options.script === null) {
+    // Explicitly no scripts - skip script scanning
+  }
+
+  // Speed optimization options
+  if (options.maxRate) {
+    args.push('--max-rate');
+    args.push(options.maxRate);
+  } else {
+    // Default faster rate for large port ranges
+    if (options.ports && options.ports.includes('-') && parseInt(options.ports.split('-')[1]) > 1000) {
+      args.push('--max-rate');
+      args.push('1000'); // Faster scan for large ranges
+    }
+  }
+
+  // Additional speed options for large scans
+  if (!options.serviceVersion && !options.script) {
+    // For quick port discovery only
+    args.push('-Pn'); // Skip host discovery (faster)
+    args.push('--open'); // Only show open ports
   }
 
   args.push(target);
 
-  return await executeTool('nmap', args, { timeout: 600000 }); // 10 minutes for full scan
+  // Adjust timeout based on scan type
+  const timeout = options.serviceVersion || options.script ? 600000 : 300000; // 5 min for quick, 10 min for deep
+  
+  return await executeTool('nmap', args, { timeout });
 }
 
 async function executeSqlmap(url, options = {}) {

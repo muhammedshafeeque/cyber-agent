@@ -31,19 +31,19 @@ async function analyzePort(target, port, service = null, previousContext = {}) {
   logger.phase('PORT ANALYSIS', `Port ${port} - ${service || 'Unknown service'}`);
 
   try {
-    // Step 1: Gather basic information about the port
-    logger.step(`Step 1/5: Gathering basic information about port ${port}...`);
+    // Step 1: Quick service identification (with version detection)
+    logger.step(`Step 1/5: Quick service identification on port ${port}...`);
     analysis.information = await gatherPortInformation(target, port, service);
     
-    // Step 2: Identify service version and details
-    logger.step(`Step 2/5: Identifying service version and details...`);
+    // Step 2: Identify service version and details (DEEP scan for THIS port only)
+    logger.step(`Step 2/5: Deep service version detection on port ${port}...`);
     const serviceDetails = await identifyServiceDetails(target, port, analysis.information);
     analysis.service = serviceDetails.service || service;
     analysis.information.version = serviceDetails.version;
     analysis.information.banner = serviceDetails.banner;
 
-    // Step 3: Search for CVEs and exploits (multiple sources)
-    logger.step(`Step 3/5: Researching CVEs and exploits from multiple sources...`);
+    // Step 3: Search for CVEs and exploits (multiple sources) - FAST parallel search
+    logger.step(`Step 3/5: Researching CVEs/exploits from multiple sources (parallel)...`);
     const exploitResearch = await researchExploitsMultiSource(
       analysis.service,
       analysis.information.version,
@@ -53,8 +53,8 @@ async function analyzePort(target, port, service = null, previousContext = {}) {
     analysis.cves = exploitResearch.cves;
     analysis.exploits = exploitResearch.exploits;
 
-    // Step 4: Analyze for RCE opportunities
-    logger.step(`Step 4/5: Analyzing RCE opportunities...`);
+    // Step 4: Analyze for RCE opportunities (prioritize high-confidence)
+    logger.step(`Step 4/5: Analyzing RCE opportunities (prioritizing high-confidence)...`);
     analysis.rceOpportunities = await analyzeRCEOpportunities(
       analysis.service,
       analysis.information,
@@ -62,7 +62,7 @@ async function analyzePort(target, port, service = null, previousContext = {}) {
       previousContext
     );
 
-    // Step 5: Determine next steps
+    // Step 5: Determine next steps (prioritize immediate RCE attempts)
     logger.step(`Step 5/5: Determining next steps...`);
     analysis.nextSteps = generateNextSteps(analysis, previousContext);
 
@@ -97,12 +97,12 @@ async function gatherPortInformation(target, port, service) {
   };
 
   try {
-    // Use nmap for detailed port scan
-    logger.tool('nmap', `Scanning port ${port}`, `on ${target}`);
+    // Use nmap for THIS port ONLY with service detection (fast since it's just one port)
+    logger.tool('nmap', `Deep scan port ${port} only`, `on ${target} (service + version detection)`);
     const nmapResult = await toolExecutor.executeNmap(target, {
-      ports: port.toString(),
-      serviceVersion: true,
-      script: 'version,default',
+      ports: port.toString(), // Only scan this one port
+      serviceVersion: true, // Enable version detection for this port
+      script: 'version,banner', // Only version and banner scripts for speed
     });
 
     if (nmapResult.success && nmapResult.output) {
@@ -166,7 +166,7 @@ async function identifyServiceDetails(target, port, information) {
 }
 
 /**
- * Research exploits from multiple sources
+ * Research exploits from multiple sources (OPTIMIZED FOR SPEED - parallel where possible)
  */
 async function researchExploitsMultiSource(service, version, port, previousContext) {
   const results = {
@@ -179,59 +179,161 @@ async function researchExploitsMultiSource(service, version, port, previousConte
     },
   };
 
+  // First: Check port-based exploits (FASTEST - no search needed)
+  logger.step('Checking known port-based exploits (instant lookup)...');
+  const portBasedExploits = checkPortBasedExploits(port);
+  if (portBasedExploits.length > 0) {
+    results.exploits.metasploit.push(...portBasedExploits);
+    logger.info(`  Found ${portBasedExploits.length} known exploit(s) for port ${port}`);
+    // If we have high-confidence exploits, we can skip deeper research for speed
+    const hasHighConfidence = portBasedExploits.some(e => e.confidence === 'high');
+    if (hasHighConfidence) {
+      logger.info('  High-confidence exploit found - skipping deeper research for speed');
+      results.cves = extractCVEs(results.exploits);
+      return results; // Return early - we have what we need!
+    }
+  }
+
   const searchTerms = [];
   if (service) searchTerms.push(service);
   if (version) searchTerms.push(version);
-  if (port) searchTerms.push(`port ${port}`);
 
   const searchQuery = searchTerms.join(' ');
 
-  logger.info(`Researching exploits for: ${searchQuery}`);
+  logger.info(`Researching exploits for: ${searchQuery || port}`);
 
-  // Source 1: Searchsploit (Exploit-DB local)
-  try {
-    logger.step('Checking Searchsploit (local Exploit-DB)...');
-    const searchsploitResults = await searchSearchsploit(service, version);
-    results.exploits.searchsploit = searchsploitResults;
-    logger.info(`  Found ${searchsploitResults.length} exploit(s) in Searchsploit`);
-  } catch (error) {
-    logger.warn(`  Searchsploit search failed: ${error.message}`);
+  // Run searches in parallel for speed (Promise.all)
+  const searchPromises = [];
+
+  // Source 1: Searchsploit (Exploit-DB local) - FAST
+  searchPromises.push(
+    (async () => {
+      try {
+        const searchsploitResults = await searchSearchsploit(service, version);
+        results.exploits.searchsploit = searchsploitResults;
+        if (searchsploitResults.length > 0) {
+          logger.info(`  ✓ Searchsploit: ${searchsploitResults.length} exploit(s)`);
+        }
+      } catch (error) {
+        // Silent fail for speed
+      }
+    })()
+  );
+
+  // Source 2: Metasploit modules - FAST if local
+  searchPromises.push(
+    (async () => {
+      try {
+        const msfResults = await searchMetasploit(service, version);
+        // Merge with port-based exploits
+        results.exploits.metasploit = [...portBasedExploits, ...msfResults];
+        if (msfResults.length > 0) {
+          logger.info(`  ✓ Metasploit: ${msfResults.length} module(s)`);
+        }
+      } catch (error) {
+        // Silent fail for speed
+      }
+    })()
+  );
+
+  // Source 3 & 4: Online sources (slower, run in parallel but don't wait if we have local results)
+  if (results.exploits.searchsploit.length === 0 && results.exploits.metasploit.length === 0) {
+    // Only search online if we don't have local results (speed optimization)
+    logger.step('No local exploits found - checking online sources...');
+    searchPromises.push(
+      searchExploitDB(service, version).then(edbResults => {
+        results.exploits.exploitdb = edbResults;
+        if (edbResults.length > 0) {
+          logger.info(`  ✓ Exploit-DB: ${edbResults.length} exploit(s)`);
+        }
+      }).catch(() => {})
+    );
   }
 
-  // Source 2: Metasploit modules
-  try {
-    logger.step('Checking Metasploit modules...');
-    const msfResults = await searchMetasploit(service, version);
-    results.exploits.metasploit = msfResults;
-    logger.info(`  Found ${msfResults.length} Metasploit module(s)`);
-  } catch (error) {
-    logger.warn(`  Metasploit search failed: ${error.message}`);
-  }
-
-  // Source 3: Exploit-DB (online)
-  try {
-    logger.step('Checking Exploit-DB (online)...');
-    const edbResults = await searchExploitDB(service, version);
-    results.exploits.exploitdb = edbResults;
-    logger.info(`  Found ${edbResults.length} exploit(s) in Exploit-DB`);
-  } catch (error) {
-    logger.warn(`  Exploit-DB search failed: ${error.message}`);
-  }
-
-  // Source 4: GitHub (public exploits)
-  try {
-    logger.step('Checking GitHub for public exploits...');
-    const githubResults = await searchGitHub(service, version, previousContext);
-    results.exploits.github = githubResults;
-    logger.info(`  Found ${githubResults.length} GitHub exploit(s)`);
-  } catch (error) {
-    logger.warn(`  GitHub search failed: ${error.message}`);
-  }
+  // Wait for parallel searches (with timeout)
+  await Promise.race([
+    Promise.all(searchPromises),
+    new Promise(resolve => setTimeout(resolve, 10000)), // 10 second timeout
+  ]);
 
   // Extract CVEs from all sources
   results.cves = extractCVEs(results.exploits);
 
   return results;
+}
+
+/**
+ * Check port-based exploits (instant lookup, no search needed)
+ */
+function checkPortBasedExploits(port) {
+  const portExploits = {
+    21: [{ 
+      name: 'exploit/unix/ftp/vsftpd_234_backdoor',
+      path: 'exploit/unix/ftp/vsftpd_234_backdoor',
+      exploit: 'exploit/unix/ftp/vsftpd_234_backdoor',
+      confidence: 'high', 
+      description: 'vsftpd 2.3.4 backdoor',
+      source: 'metasploit',
+    }],
+    3632: [{ 
+      name: 'exploit/unix/misc/distcc_exec',
+      path: 'exploit/unix/misc/distcc_exec',
+      exploit: 'exploit/unix/misc/distcc_exec',
+      confidence: 'high', 
+      description: 'DistCC command execution',
+      source: 'metasploit',
+    }],
+    6667: [{ 
+      name: 'exploit/unix/irc/unreal_ircd_3281_backdoor',
+      path: 'exploit/unix/irc/unreal_ircd_3281_backdoor',
+      exploit: 'exploit/unix/irc/unreal_ircd_3281_backdoor',
+      confidence: 'high', 
+      description: 'UnrealIRCd backdoor',
+      source: 'metasploit',
+    }],
+    2121: [{ 
+      name: 'exploit/unix/ftp/proftpd_133c_backdoor',
+      path: 'exploit/unix/ftp/proftpd_133c_backdoor',
+      exploit: 'exploit/unix/ftp/proftpd_133c_backdoor',
+      confidence: 'high', 
+      description: 'ProFTPd backdoor',
+      source: 'metasploit',
+    }],
+    1524: [{ 
+      name: 'exploit/unix/misc/distcc_exec',
+      path: 'exploit/unix/misc/distcc_exec',
+      exploit: 'exploit/unix/misc/distcc_exec',
+      confidence: 'medium', 
+      description: 'Ingres lock port - often has shell',
+      source: 'metasploit',
+    }],
+    514: [{ 
+      name: 'exploit/multi/samba/usermap_script',
+      path: 'exploit/multi/samba/usermap_script',
+      exploit: 'exploit/multi/samba/usermap_script',
+      confidence: 'medium', 
+      description: 'Rsh remote shell',
+      source: 'metasploit',
+    }],
+    512: [{ 
+      name: 'exploit/multi/samba/usermap_script',
+      path: 'exploit/multi/samba/usermap_script',
+      exploit: 'exploit/multi/samba/usermap_script',
+      confidence: 'medium', 
+      description: 'Rexec remote exec',
+      source: 'metasploit',
+    }],
+    513: [{ 
+      name: 'auxiliary/scanner/rservices/rlogin_login',
+      path: 'auxiliary/scanner/rservices/rlogin_login',
+      exploit: 'auxiliary/scanner/rservices/rlogin_login',
+      confidence: 'medium', 
+      description: 'Rlogin service',
+      source: 'metasploit',
+    }],
+  };
+
+  return portExploits[port] || [];
 }
 
 /**
@@ -424,9 +526,19 @@ async function analyzeRCEOpportunities(service, information, exploitResearch, pr
     }
   }
 
-  // Check service-specific RCE opportunities
+  // Check service-specific RCE opportunities (adds port-based exploits if not already added)
   const serviceOpportunities = checkServiceRCEOpportunities(service, information, previousContext);
-  opportunities.push(...serviceOpportunities);
+  
+  // Merge but avoid duplicates
+  serviceOpportunities.forEach(serviceOpp => {
+    const exists = opportunities.some(opp => 
+      opp.exploit === serviceOpp.exploit || 
+      opp.metasploit_module === serviceOpp.exploit
+    );
+    if (!exists) {
+      opportunities.push(serviceOpp);
+    }
+  });
 
   return opportunities;
 }
