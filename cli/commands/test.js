@@ -31,7 +31,13 @@ command
       const spinner = createSpinner('Running autonomous penetration test...');
       
       try {
+        // Start agent - it will handle its own logging with live command output
         const report = await agent.start();
+        
+        // Stop spinner before showing final results
+        if (spinner && spinner.stop) {
+          spinner.stop();
+        }
         spinner.succeed('Test completed');
 
         // Display results

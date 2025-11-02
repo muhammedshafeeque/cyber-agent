@@ -1,6 +1,7 @@
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const { promisify } = require('util');
 const toolRegistry = require('./tool-registry.service');
+const logger = require('../../cli/utils/logger');
 
 const execAsync = promisify(exec);
 
@@ -38,48 +39,18 @@ async function executeTool(toolName, args = [], options = {}) {
     // Build command
     const command = `${toolStatus.path || toolName} ${commandArgs}`;
     
-    // Execute with timeout
+    // Show command being executed
+    logger.tool('CMD', `Executing: ${command}`);
+    logger.separator();
+    
+    // Execute with streaming output (real-time)
     const timeout = options.timeout || 300000; // 5 minutes default
     
-    try {
-      const { stdout, stderr } = await Promise.race([
-        execAsync(command, {
-          maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-          timeout,
-        }),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Command timeout')), timeout)
-        ),
-      ]);
-
-      const result = {
-        success: true,
-        tool: toolName,
-        command,
-        stdout,
-        stderr,
-        output: stdout + (stderr || ''),
-      };
-
-      // Log execution
-      logExecution(toolName, command, result);
-
-      return result;
-    } catch (error) {
-      const result = {
-        success: false,
-        tool: toolName,
-        command,
-        error: error.message,
-        stderr: error.stderr,
-        stdout: error.stdout,
-      };
-
-      // Log execution
-      logExecution(toolName, command, result);
-
-      return result;
-    }
+    return await executeWithStream(toolName, toolStatus.path || toolName, args, {
+      ...options,
+      timeout,
+      command,
+    });
   } catch (error) {
     return {
       success: false,
@@ -88,11 +59,111 @@ async function executeTool(toolName, args = [], options = {}) {
   }
 }
 
+async function executeWithStream(toolName, executable, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let output = '';
+    
+    // Spawn process
+    const proc = spawn(executable, args, {
+      shell: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    
+    // Stream stdout
+    proc.stdout.on('data', (data) => {
+      const text = data.toString();
+      stdout += text;
+      output += text;
+      // Display in real-time
+      process.stdout.write(text);
+    });
+    
+    // Stream stderr
+    proc.stderr.on('data', (data) => {
+      const text = data.toString();
+      stderr += text;
+      output += text;
+      // Display in real-time (stderr in yellow)
+      process.stdout.write(`\x1b[33m${text}\x1b[0m`); // Yellow for stderr
+    });
+    
+    // Handle completion
+    proc.on('close', (code) => {
+      logger.separator();
+      
+      const result = {
+        success: code === 0,
+        tool: toolName,
+        command: options.command || `${executable} ${args.join(' ')}`,
+        stdout,
+        stderr,
+        output,
+        exitCode: code,
+      };
+      
+      if (code === 0) {
+        logger.success(`Command completed successfully (exit code: ${code})`);
+      } else {
+        logger.warn(`Command exited with code ${code}`);
+      }
+      
+      // Log execution
+      logExecution(toolName, result.command, result);
+      
+      resolve(result);
+    });
+    
+    // Handle errors
+    proc.on('error', (error) => {
+      logger.error(`Command execution error: ${error.message}`);
+      
+      const result = {
+        success: false,
+        tool: toolName,
+        command: options.command || `${executable} ${args.join(' ')}`,
+        error: error.message,
+        stdout,
+        stderr,
+        output,
+      };
+      
+      logExecution(toolName, result.command, result);
+      resolve(result);
+    });
+    
+    // Handle timeout
+    if (options.timeout) {
+      setTimeout(() => {
+        if (!proc.killed) {
+          proc.kill('SIGTERM');
+          logger.warn(`Command timed out after ${options.timeout}ms`);
+          
+          const result = {
+            success: false,
+            tool: toolName,
+            command: options.command || `${executable} ${args.join(' ')}`,
+            error: 'Command timeout',
+            stdout,
+            stderr,
+            output,
+          };
+          
+          logExecution(toolName, result.command, result);
+          resolve(result);
+        }
+      }, options.timeout);
+    }
+  });
+}
+
 async function executeNmap(target, options = {}) {
   const args = [];
   
   if (options.ports) {
-    args.push(`-p ${options.ports}`);
+    args.push(`-p`);
+    args.push(options.ports);
   } else {
     args.push('-p-'); // All ports
   }
@@ -102,7 +173,8 @@ async function executeNmap(target, options = {}) {
   }
 
   if (options.script) {
-    args.push(`--script ${options.script}`);
+    args.push(`--script`);
+    args.push(options.script);
   }
 
   args.push(target);
@@ -121,7 +193,8 @@ async function executeSqlmap(url, options = {}) {
     args.push(`--crawl=${options.crawl}`);
   }
 
-  args.push(`-u ${url}`);
+  args.push('-u');
+  args.push(url);
 
   return await executeTool('sqlmap', args, { timeout: 600000 });
 }
@@ -225,6 +298,7 @@ module.exports = {
   executeNikto,
   executeMetasploit,
   executeNcat,
+  executeWithStream,
   validateCommand,
   logExecution,
 };
