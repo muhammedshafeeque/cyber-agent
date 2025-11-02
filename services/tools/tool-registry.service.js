@@ -40,6 +40,18 @@ async function detectKaliLinux() {
 }
 
 async function findToolInSystem(toolName) {
+  // Ensure toolName is a string
+  if (typeof toolName !== 'string') {
+    console.error(`[Tool Registry] Invalid toolName type: ${typeof toolName}`, toolName);
+    return {
+      name: String(toolName),
+      path: null,
+      available: false,
+      isKali: false,
+      version: null,
+    };
+  }
+  
   try {
     // Check PATH
     const { stdout } = await execAsync(`which ${toolName}`);

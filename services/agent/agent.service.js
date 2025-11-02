@@ -91,10 +91,20 @@ class AutonomousAgent {
 
     this.state.recordDecision(decision.action, decision.reasoning);
 
+    // Ensure recommendedTools is an array of strings
+    let recommendedTools = [];
+    if (decision.recommendedTools) {
+      if (Array.isArray(decision.recommendedTools)) {
+        recommendedTools = decision.recommendedTools.filter(t => typeof t === 'string');
+      } else if (typeof decision.recommendedTools === 'string') {
+        recommendedTools = [decision.recommendedTools];
+      }
+    }
+    
     // Execute vulnerability scans
     const vulnResults = await scannerService.runVulnerabilityScans(
       this.state.target,
-      decision.recommendedTools
+      recommendedTools
     );
 
     this.state.addScanResult(vulnResults);

@@ -18,14 +18,31 @@ async function decideNextAction(agentState, context = 'general', additionalData 
     ], {
       temperature: 0.7,
       maxTokens: 1500,
+      fallbackResponse: JSON.stringify({
+        action: 'continue',
+        reasoning: 'AI service unavailable - using default decision',
+        tools: [],
+        nextPhase: null,
+        priority: 'medium',
+      }),
     });
 
     const decision = parseDecisionResponse(response);
     
+    // Ensure tools is always an array of strings
+    let tools = [];
+    if (decision.tools) {
+      if (Array.isArray(decision.tools)) {
+        tools = decision.tools.filter(t => typeof t === 'string');
+      } else if (typeof decision.tools === 'string') {
+        tools = [decision.tools];
+      }
+    }
+    
     return {
       action: decision.action || 'continue',
       reasoning: decision.reasoning || response,
-      recommendedTools: decision.tools || [],
+      recommendedTools: tools,
       nextPhase: decision.nextPhase,
       priority: decision.priority || 'medium',
     };
