@@ -6,6 +6,8 @@ const { createDocument, createEdge } = require('./graph.service');
 const { createScan, createVulnerability, createApplication } = require('../models/graph.models');
 const { getIPAddress, getHostname, normalizeTarget, isWebTarget } = require('./utils/target-utils');
 const logger = require('../cli/utils/logger');
+const { getScanProfile, selectTools, executeProgressiveScan } = require('./utils/progressive-strategy');
+const { learnFromScanResult, learnFromError, adaptStrategy, thinkBeforeAction, getPreviousLearnings } = require('./learning/adaptation.service');
 
 async function runReconnaissance(target) {
   try {
@@ -15,24 +17,88 @@ async function runReconnaissance(target) {
     const ipAddress = getIPAddress(target);
     const hostname = getHostname(target);
 
+    // Learn from previous attempts
+    logger.step('Learning from previous attempts...');
+    const previousLearnings = await getPreviousLearnings(target, 5);
+    const previousErrors = previousLearnings
+      .filter(l => l.result && l.result.errors)
+      .flatMap(l => l.result.errors.map(e => e.error));
+    
+    const adaptations = await adaptStrategy(target, previousLearnings);
+    
+    // Think before acting - plan simple actions first
+    logger.step('Planning simple actions first...');
+    const plan = await thinkBeforeAction(target, [], previousErrors);
+    
+    if (plan.simpleActions.length > 0) {
+      logger.info(`Starting with ${plan.simpleActions.length} simple action(s) (~${plan.estimatedTime}s)`);
+    }
+
     // Ensure nmap is available
     logger.step('Checking nmap availability...');
     const nmapStatus = await toolRegistry.ensureToolAvailable('nmap');
     if (!nmapStatus.available && !nmapStatus.installed) {
+      const errorLearning = await learnFromError(
+        new Error('nmap not available and could not be installed'),
+        'tool_check',
+        { target }
+      );
       throw new Error('nmap not available and could not be installed');
     }
     logger.success(`nmap ${nmapStatus.available ? 'available' : 'installed'}`);
 
-    // Run nmap scan (works with IP addresses or hostnames)
-    logger.tool('nmap', `Scanning ${ipAddress || hostname}`, '(ports 1-1000, service version detection)');
-    const scanResult = await toolExecutor.executeNmap(ipAddress || hostname, {
-      ports: '1-1000', // Initial scan of common ports
-      serviceVersion: true,
-    });
-
-    // Parse results
-    logger.step('Parsing nmap output...');
+    // Progressive reconnaissance: start with quick scan
+    logger.info('Starting with QUICK scan (common ports only) for speed...');
+    const quickProfile = getScanProfile(0);
+    
+    logger.tool('nmap', `Scanning ${ipAddress || hostname}`, `(${quickProfile.description})`);
+    let scanResult;
+    
+    try {
+      scanResult = await toolExecutor.executeNmap(ipAddress || hostname, quickProfile.nmap);
+    } catch (error) {
+      // Learn from error
+      await learnFromError(error, 'nmap_scan', { target, profile: quickProfile.name });
+      throw error;
+    }
+    
+    // Check if we got results
     const parsed = await analyzer.analyzeOutput('nmap', scanResult.output || scanResult.stdout);
+    
+    // If quick scan found services, we're good. Otherwise escalate
+    if (!parsed.ports || parsed.ports.length === 0) {
+      logger.warn('Quick scan found no open ports. Trying medium scan...');
+      const mediumProfile = getScanProfile(1);
+      logger.tool('nmap', `Deep scan ${ipAddress || hostname}`, `(${mediumProfile.description})`);
+      const deepResult = await toolExecutor.executeNmap(ipAddress || hostname, mediumProfile.nmap);
+      // Use deep scan results if available
+      if (deepResult.success || deepResult.output) {
+        return {
+          ...deepResult,
+          parsed: await analyzer.analyzeOutput('nmap', deepResult.output || deepResult.stdout),
+        };
+      }
+    }
+
+    // Parse results (already done above if we escalated)
+    let parsed = scanResult.parsed;
+    if (!parsed) {
+      logger.step('Parsing nmap output...');
+      parsed = await analyzer.analyzeOutput('nmap', scanResult.output || scanResult.stdout);
+    }
+
+    // Learn from scan result
+    logger.step('Learning from scan results...');
+    const learnings = await learnFromScanResult(scanResult, { target, phase: 'reconnaissance' });
+    
+    if (learnings.recommendations.length > 0) {
+      logger.info(`Generated ${learnings.recommendations.length} recommendation(s) for next steps`);
+      learnings.recommendations.forEach(rec => {
+        if (rec.type === 'tool_suggestion') {
+          logger.step(`  → Consider using ${rec.tool}: ${rec.reason}`);
+        }
+      });
+    }
 
     // Store scan
     const scanDoc = createScan(target, 'reconnaissance', 'completed');
@@ -62,8 +128,9 @@ async function runReconnaissance(target) {
   }
 }
 
-async function runVulnerabilityScans(target, toolNames = []) {
+async function runVulnerabilityScans(target, toolNames = [], options = {}) {
   const results = [];
+  const attemptNumber = options.attemptNumber || 0;
 
   try {
     // Normalize target for different tool types
@@ -71,13 +138,26 @@ async function runVulnerabilityScans(target, toolNames = []) {
     const hostname = getHostname(target);
     const webURL = isWebTarget(target) ? normalizeTarget(target) : null;
     
-    // Default tools if none specified
-    // For IP addresses, skip web-specific tools unless we detect web services
-    let defaultTools = ['nikto'];
-    if (webURL || isWebTarget(target)) {
-      defaultTools.push('sqlmap');
+    // Progressive tool selection: start simple, escalate if needed
+    let tools = [];
+    if (toolNames.length > 0) {
+      tools = toolNames;
+    } else {
+      // Smart tool selection based on attempt and target type
+      const previousResults = options.previousResults || [];
+      const discoveredServices = previousResults
+        .flatMap(r => r.parsed?.services || [])
+        .filter(s => s); // Get services from previous scans
+      
+      tools = selectTools(target, discoveredServices, attemptNumber);
+      
+      if (tools.length === 0) {
+        // Fallback to basic tools
+        tools = attemptNumber === 0 ? ['nikto'] : ['nikto', 'sqlmap', 'dirb'];
+      }
     }
-    const tools = toolNames.length > 0 ? toolNames : defaultTools;
+    
+    logger.info(`Using ${attemptNumber === 0 ? 'QUICK' : attemptNumber === 1 ? 'MEDIUM' : 'THOROUGH'} scan strategy (attempt ${attemptNumber + 1})`);
 
     for (let i = 0; i < tools.length; i++) {
       const toolName = tools[i];
@@ -89,9 +169,18 @@ async function runVulnerabilityScans(target, toolNames = []) {
       
       if (!toolStatus.available && !toolStatus.installed) {
         logger.warn(`Skipping ${toolName} - not available and could not be installed`);
+        // Learn from this failure
+        await learnFromError(
+          new Error(`${toolName} not available`),
+          'tool_execution',
+          { target, tool: toolName, attempt: attemptNumber }
+        );
         continue;
       }
 
+      // Think: Can we do this simply first?
+      logger.step(`Analyzing best approach for ${toolName}...`);
+      
       // Execute tool based on type
       let scanResult;
       switch (toolName.toLowerCase()) {
@@ -142,8 +231,30 @@ async function runVulnerabilityScans(target, toolNames = []) {
           vulnerabilities: analysis.vulnerabilities || [],
         };
         
+        // Learn from this successful scan
+        const scanLearnings = await learnFromScanResult(resultObj, {
+          target,
+          tool: toolName,
+          attempt: attemptNumber,
+          phase: 'vulnerability_discovery',
+        });
+        
         if (resultObj.vulnerabilities.length > 0) {
           logger.success(`${toolName} found ${resultObj.vulnerabilities.length} potential vulnerability(ies)`);
+          
+          // Apply learnings - suggest next simple actions
+          if (scanLearnings.recommendations.length > 0) {
+            scanLearnings.recommendations.forEach(rec => {
+              if (rec.priority === 'high') {
+                logger.step(`  → Next: ${rec.action || rec.tool} - ${rec.reason}`);
+              }
+            });
+          }
+          
+          // If we found vulnerabilities on first attempt, we can stop early
+          if (attemptNumber === 0 && resultObj.vulnerabilities.length > 0) {
+            logger.info('Quick scan found vulnerabilities - consider stopping here for efficiency');
+          }
         } else {
           logger.info(`${toolName} completed - no vulnerabilities detected`);
         }
@@ -151,10 +262,36 @@ async function runVulnerabilityScans(target, toolNames = []) {
         results.push(resultObj);
       } else {
         logger.warn(`${toolName} failed or produced no output`);
+        
+        // Learn from error and get adaptation suggestions
+        const errorLearning = await learnFromError(
+          new Error(scanResult.error || 'Tool execution failed'),
+          'tool_execution',
+          { target, tool: toolName, attempt: attemptNumber }
+        );
+        
+        // Apply adaptations if suggested
+        if (errorLearning.adaptation && errorLearning.adaptation.suggestion) {
+          logger.info(`Learning: ${errorLearning.adaptation.suggestion}`);
+          if (errorLearning.adaptation.nextAction === 'retry_with_quick_scan') {
+            logger.step(`Will retry ${toolName} with quicker settings`);
+          }
+        }
+        
+        // Retry with better method if this was a quick attempt
+        if (attemptNumber === 0) {
+          logger.step(`Will retry ${toolName} with more thorough settings on next attempt`);
+        }
       }
     }
     
-    logger.info(`Completed ${results.length} scan(s)`);
+    logger.info(`Completed ${results.length} scan(s) on attempt ${attemptNumber + 1}`);
+    
+    // If no results and this was a quick attempt, suggest retrying
+    const hasResults = results.some(r => r.vulnerabilities && r.vulnerabilities.length > 0);
+    if (!hasResults && attemptNumber === 0 && results.length > 0) {
+      logger.warn('Quick scan found no vulnerabilities. Consider retrying with deeper scan.');
+    }
 
     return results;
   } catch (error) {

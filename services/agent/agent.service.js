@@ -127,12 +127,86 @@ class AutonomousAgent {
       recommendedTools = ['nmap', 'nikto']; // Default tools
     }
     
-    // Execute vulnerability scans
+    // Execute vulnerability scans with progressive strategy
     logger.separator();
-    const vulnResults = await scannerService.runVulnerabilityScans(
-      this.state.target,
-      recommendedTools
-    );
+    
+    // Learn from previous attempts
+    const { getPreviousLearnings, adaptStrategy, thinkBeforeAction } = require('../learning/adaptation.service');
+    logger.step('Learning from previous attempts and planning...');
+    
+    const previousLearnings = await getPreviousLearnings(this.state.target, 10);
+    const adaptations = await adaptStrategy(this.state.target, previousLearnings);
+    
+    // Get discovered services from scan results
+    const discoveredServices = scanResults?.parsed?.services || [];
+    const previousErrors = previousLearnings
+      .filter(l => l.result && l.result.errors)
+      .flatMap(l => l.result.errors.map(e => e.error));
+    
+    // Think before acting - plan simple actions first
+    const plan = await thinkBeforeAction(this.state.target, discoveredServices, previousErrors);
+    
+    if (plan.simpleActions.length > 0) {
+      logger.info(`Planning to start with ${plan.simpleActions.length} simple action(s) (~${plan.estimatedTime}s)`);
+      plan.simpleActions.forEach(action => {
+        logger.step(`  → ${action.action}: ${action.reason} (~${action.time}s)`);
+      });
+    }
+    
+    // Track scan attempts
+    let attemptNumber = 0;
+    let previousScanResults = null;
+    let vulnResults = [];
+    
+    // Try progressive scanning: quick first, escalate if needed
+    const maxAttempts = 2; // Quick + one deeper attempt
+    
+    while (attemptNumber < maxAttempts) {
+      logger.info(`\n=== Scan Attempt ${attemptNumber + 1}/${maxAttempts} ===`);
+      
+      // Apply adaptations
+      if (adaptations.skipTools.length > 0 && attemptNumber === 0) {
+        logger.warn(`Skipping tools that previously failed: ${adaptations.skipTools.join(', ')}`);
+        recommendedTools = recommendedTools.filter(t => !adaptations.skipTools.includes(t));
+      }
+      
+      const currentResults = await scannerService.runVulnerabilityScans(
+        this.state.target,
+        attemptNumber === 0 ? recommendedTools : [], // Use recommended on first, auto-select on retry
+        {
+          attemptNumber,
+          previousResults: previousScanResults,
+          adaptations, // Pass adaptations to scanner
+        }
+      );
+      
+      vulnResults = vulnResults.concat(currentResults);
+      
+      // Check if we found vulnerabilities
+      const hasVulnerabilities = currentResults.some(r => 
+        r.vulnerabilities && r.vulnerabilities.length > 0
+      );
+      
+      if (hasVulnerabilities && attemptNumber === 0) {
+        logger.success('Quick scan found vulnerabilities - sufficient for now');
+        break; // Found results on quick scan, stop early
+      }
+      
+      if (hasVulnerabilities) {
+        logger.success('Found vulnerabilities on deeper scan');
+        break; // Found results, stop
+      }
+      
+      // No results, try deeper scan
+      if (attemptNumber < maxAttempts - 1) {
+        logger.warn('No vulnerabilities found - escalating to deeper scan...');
+        previousScanResults = currentResults;
+      }
+      
+      attemptNumber++;
+    }
+    
+    logger.separator();
 
     if (vulnResults && Array.isArray(vulnResults)) {
       vulnResults.forEach(result => {
