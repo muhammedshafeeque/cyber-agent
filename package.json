@@ -1,0 +1,46 @@
+{
+  "name": "cyber-agent",
+  "version": "1.0.0",
+  "description": "Autonomous Cybersecurity Penetration Testing CLI Tool",
+  "main": "index.js",
+  "bin": {
+    "cyber-agent": "./bin/cyber-agent"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "penetration-testing",
+    "cybersecurity",
+    "cli",
+    "automation",
+    "ai"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "arangojs": "^10.0.0",
+    "axios": "^1.6.0",
+    "boxen": "^7.1.1",
+    "chalk": "^5.3.0",
+    "cheerio": "^1.0.0",
+    "cli-progress": "^3.12.0",
+    "commander": "^11.1.0",
+    "dotenv": "^16.3.1",
+    "form-data": "^4.0.0",
+    "fs-extra": "^11.2.0",
+    "inquirer": "^9.2.12",
+    "ora": "^7.0.1",
+    "puppeteer": "^21.5.0",
+    "sharp": "^0.33.0",
+    "shelljs": "^0.8.5",
+    "table": "^6.8.1",
+    "uuid": "^9.0.1",
+    "xml2js": "^0.6.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+

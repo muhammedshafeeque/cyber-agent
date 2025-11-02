@@ -1,0 +1,10 @@
+node_modules/
+.env
+.work/
+work/
+*.log
+.DS_Store
+*.swp
+*.swo
+*~
+
