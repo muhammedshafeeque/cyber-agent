@@ -81,18 +81,48 @@ async function ensureGraph(db) {
   
   try {
     const graph = db.graph(graphName);
+    // Check if graph exists - if it does but is misconfigured, drop and recreate
+    if (await graph.exists()) {
+      try {
+        // Try to get graph info to see if it's properly configured
+        const info = await graph.get();
+        console.log(`Graph ${graphName} already exists.`);
+        return; // Graph exists and is configured
+      } catch (error) {
+        // Graph exists but might be misconfigured, try to drop it
+        console.log(`Graph ${graphName} exists but may be misconfigured. Dropping...`);
+        try {
+          await graph.drop();
+          console.log(`Dropped existing graph ${graphName}`);
+        } catch (dropError) {
+          console.warn(`Could not drop graph: ${dropError.message}`);
+          return; // Can't recreate, use existing
+        }
+      }
+    }
+    
     if (!(await graph.exists())) {
       // First create edge collections
       const edgeCollections = [
         'vulnerability_found_in',
         'detected_by',
         'exploits',
+        'exploits_cves',
         'tool_for',
-        'combines_with',
+        'combines_tools_tools',
+        'combines_tools_scripts',
+        'combines_with_scripts',
+        'combines_scripts_tools',
         'generates',
-        'similar_to',
+        'generates_scripts',
+        'similar_vuln_vuln',
+        'similar_vuln_technique',
+        'similar_technique_technique',
+        'similar_technique_vuln',
         'requires',
         'learned_from',
+        'learned_from_tools',
+        'learned_from_exploits',
       ];
 
       for (const edgeName of edgeCollections) {
@@ -108,6 +138,8 @@ async function ensureGraph(db) {
       }
 
       // Create graph with edge definitions
+      // ArangoDB requires each edge collection to appear only once
+      // For edges with multiple from/to, we split into separate edge collections
       const edgeDefinitions = [
         {
           edgeCollection: 'vulnerability_found_in',
@@ -122,7 +154,12 @@ async function ensureGraph(db) {
         {
           edgeCollection: 'exploits',
           from: ['exploits'],
-          to: ['cves', 'vulnerabilities'],
+          to: ['vulnerabilities'],
+        },
+        {
+          edgeCollection: 'exploits_cves',
+          from: ['exploits'],
+          to: ['cves'],
         },
         {
           edgeCollection: 'tool_for',
@@ -130,19 +167,54 @@ async function ensureGraph(db) {
           to: ['vulnerabilities'],
         },
         {
-          edgeCollection: 'combines_with',
-          from: ['tools', 'scripts'],
-          to: ['tools', 'scripts'],
+          edgeCollection: 'combines_tools_tools',
+          from: ['tools'],
+          to: ['tools'],
+        },
+        {
+          edgeCollection: 'combines_tools_scripts',
+          from: ['tools'],
+          to: ['scripts'],
+        },
+        {
+          edgeCollection: 'combines_scripts_scripts',
+          from: ['scripts'],
+          to: ['scripts'],
+        },
+        {
+          edgeCollection: 'combines_scripts_tools',
+          from: ['scripts'],
+          to: ['tools'],
         },
         {
           edgeCollection: 'generates',
-          from: ['tools', 'scripts'],
+          from: ['tools'],
           to: ['exploits'],
         },
         {
-          edgeCollection: 'similar_to',
-          from: ['vulnerabilities', 'techniques'],
-          to: ['vulnerabilities', 'techniques'],
+          edgeCollection: 'generates_scripts',
+          from: ['scripts'],
+          to: ['exploits'],
+        },
+        {
+          edgeCollection: 'similar_vuln_vuln',
+          from: ['vulnerabilities'],
+          to: ['vulnerabilities'],
+        },
+        {
+          edgeCollection: 'similar_vuln_technique',
+          from: ['vulnerabilities'],
+          to: ['techniques'],
+        },
+        {
+          edgeCollection: 'similar_technique_technique',
+          from: ['techniques'],
+          to: ['techniques'],
+        },
+        {
+          edgeCollection: 'similar_technique_vuln',
+          from: ['techniques'],
+          to: ['vulnerabilities'],
         },
         {
           edgeCollection: 'requires',
@@ -151,12 +223,31 @@ async function ensureGraph(db) {
         },
         {
           edgeCollection: 'learned_from',
-          from: ['vulnerabilities', 'tools', 'exploits'],
+          from: ['vulnerabilities'],
+          to: ['research_sources'],
+        },
+        {
+          edgeCollection: 'learned_from_tools',
+          from: ['tools'],
+          to: ['research_sources'],
+        },
+        {
+          edgeCollection: 'learned_from_exploits',
+          from: ['exploits'],
           to: ['research_sources'],
         },
       ];
 
+      // Ensure all edge collections exist before creating graph
+      for (const def of edgeDefinitions) {
+        const edgeCol = db.collection(def.edgeCollection);
+        if (!(await edgeCol.exists())) {
+          await db.createEdgeCollection(def.edgeCollection);
+        }
+      }
+
       const graph = db.graph(graphName);
+      // Use proper format for graph creation - edgeDefinitions as first parameter
       await graph.create(edgeDefinitions);
       console.log(`Graph ${graphName} created.`);
     }

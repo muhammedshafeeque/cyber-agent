@@ -145,10 +145,10 @@ async function storeLearnedKnowledge(learned, sourceUrl) {
       );
       const savedTool = await createDocument('tools', toolDoc);
       
-      // Link to source
+      // Link to source (use learned_from_tools for tools)
       if (savedSource && savedSource._id && savedTool && savedTool._id) {
         try {
-          await createEdge('learned_from', savedTool._id, savedSource._id);
+          await createEdge('learned_from_tools', savedTool._id, savedSource._id);
         } catch (error) {
           console.error('Error creating edge:', error);
         }
@@ -165,22 +165,22 @@ async function storeLearnedKnowledge(learned, sourceUrl) {
       );
       const savedExploit = await createDocument('exploits', exploitDoc);
       
-      // Link to source
+      // Link to source (use learned_from_exploits for exploits)
       if (savedSource && savedSource._id && savedExploit && savedExploit._id) {
         try {
-          await createEdge('learned_from', savedExploit._id, savedSource._id);
+          await createEdge('learned_from_exploits', savedExploit._id, savedSource._id);
         } catch (error) {
           console.error('Error creating edge:', error);
         }
       }
 
-      // Link to CVEs
+      // Link to CVEs (use exploits_cves edge collection)
       for (const cveId of exploit.cves) {
         try {
           const cveDoc = createCVEEntry(cveId, '', 'unknown', new Date().toISOString());
           const savedCVE = await createDocument('cves', cveDoc);
           if (savedExploit && savedExploit._id && savedCVE && savedCVE._id) {
-            await createEdge('exploits', savedExploit._id, savedCVE._id);
+            await createEdge('exploits_cves', savedExploit._id, savedCVE._id);
           }
         } catch (error) {
           console.error(`Error linking CVE ${cveId}:`, error);

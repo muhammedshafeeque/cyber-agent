@@ -5,28 +5,33 @@ const exploitGenerator = require('./exploit/exploit-generator.service');
 const { createDocument, createEdge } = require('./graph.service');
 const { createScan, createVulnerability, createApplication } = require('../models/graph.models');
 const { getIPAddress, getHostname, normalizeTarget, isWebTarget } = require('./utils/target-utils');
+const logger = require('../cli/utils/logger');
 
 async function runReconnaissance(target) {
   try {
-    console.log(`[Scanner] Starting reconnaissance on ${target}`);
+    logger.tool('Reconnaissance', `Starting scan on ${target}`);
     
     // Normalize target - handle both IP addresses and URLs
     const ipAddress = getIPAddress(target);
     const hostname = getHostname(target);
 
     // Ensure nmap is available
+    logger.step('Checking nmap availability...');
     const nmapStatus = await toolRegistry.ensureToolAvailable('nmap');
     if (!nmapStatus.available && !nmapStatus.installed) {
       throw new Error('nmap not available and could not be installed');
     }
+    logger.success(`nmap ${nmapStatus.available ? 'available' : 'installed'}`);
 
     // Run nmap scan (works with IP addresses or hostnames)
+    logger.tool('nmap', `Scanning ${ipAddress || hostname}`, '(ports 1-1000, service version detection)');
     const scanResult = await toolExecutor.executeNmap(ipAddress || hostname, {
       ports: '1-1000', // Initial scan of common ports
       serviceVersion: true,
     });
 
     // Parse results
+    logger.step('Parsing nmap output...');
     const parsed = await analyzer.analyzeOutput('nmap', scanResult.output || scanResult.stdout);
 
     // Store scan
@@ -49,7 +54,7 @@ async function runReconnaissance(target) {
       scanId: savedScan?._id,
     };
   } catch (error) {
-    console.error('Error in reconnaissance:', error);
+    logger.error('Error in reconnaissance:', error);
     return {
       success: false,
       error: error.message,
@@ -74,12 +79,16 @@ async function runVulnerabilityScans(target, toolNames = []) {
     }
     const tools = toolNames.length > 0 ? toolNames : defaultTools;
 
-    for (const toolName of tools) {
+    for (let i = 0; i < tools.length; i++) {
+      const toolName = tools[i];
+      
+      logger.tool(toolName, `Starting scan (${i + 1}/${tools.length})`);
+      
       // Ensure tool is available
       const toolStatus = await toolRegistry.ensureToolAvailable(toolName);
       
       if (!toolStatus.available && !toolStatus.installed) {
-        console.log(`[Scanner] Skipping ${toolName} - not available`);
+        logger.warn(`Skipping ${toolName} - not available and could not be installed`);
         continue;
       }
 
@@ -88,6 +97,7 @@ async function runVulnerabilityScans(target, toolNames = []) {
       switch (toolName.toLowerCase()) {
         case 'nmap':
           // Nmap works with IP addresses or hostnames
+          logger.tool('nmap', `Scanning ${ipAddress || hostname}`, '(all ports, version detection)');
           scanResult = await toolExecutor.executeNmap(ipAddress || hostname, {
             ports: '1-65535',
             serviceVersion: true,
@@ -96,48 +106,66 @@ async function runVulnerabilityScans(target, toolNames = []) {
         case 'nikto':
           // Nikto works with IP addresses or URLs
           const niktoTarget = webURL || `http://${ipAddress || hostname}`;
+          logger.tool('nikto', `Scanning ${niktoTarget}`);
           scanResult = await toolExecutor.executeNikto(niktoTarget);
           break;
         case 'sqlmap':
           // Sqlmap needs a URL - use normalized URL or construct from IP
           if (webURL) {
+            logger.tool('sqlmap', `Testing ${webURL}`, '(SQL injection, forms)');
             scanResult = await toolExecutor.executeSqlmap(webURL, {
               forms: true,
             });
           } else {
             // Skip sqlmap if no URL available
-            console.log(`[Scanner] Skipping ${toolName} - requires URL, got IP address`);
+            logger.warn(`Skipping ${toolName} - requires URL, got IP address`);
             continue;
           }
           break;
         default:
           // Generic execution - use IP/hostname for network tools, URL for web tools
           const toolTarget = isWebTarget(toolName) ? (webURL || `http://${ipAddress || hostname}`) : (ipAddress || hostname);
+          logger.tool(toolName, `Executing on ${toolTarget}`);
           scanResult = await toolExecutor.executeTool(toolName, [toolTarget]);
       }
 
       if (scanResult.success || scanResult.output) {
+        logger.step(`Analyzing ${toolName} output...`);
         // Analyze output
         const analysis = await analyzer.analyzeOutput(toolName, scanResult.output || scanResult.stdout || '');
         
-        results.push({
+        const resultObj = {
           tool: toolName,
-          result: scanResult,
-          analysis,
-        });
+          success: scanResult.success,
+          output: scanResult.output || scanResult.stdout,
+          parsed: analysis,
+          vulnerabilities: analysis.vulnerabilities || [],
+        };
+        
+        if (resultObj.vulnerabilities.length > 0) {
+          logger.success(`${toolName} found ${resultObj.vulnerabilities.length} potential vulnerability(ies)`);
+        } else {
+          logger.info(`${toolName} completed - no vulnerabilities detected`);
+        }
+        
+        results.push(resultObj);
+      } else {
+        logger.warn(`${toolName} failed or produced no output`);
       }
     }
+    
+    logger.info(`Completed ${results.length} scan(s)`);
 
     return results;
   } catch (error) {
-    console.error('Error in vulnerability scans:', error);
+    logger.error('Error in vulnerability scans:', error);
     return results;
   }
 }
 
 async function attemptRCE(target, vulnerability) {
   try {
-    console.log(`[Scanner] Attempting RCE via ${vulnerability.type}`);
+    logger.tool('RCE Attempt', `Trying ${vulnerability.type}`, `on ${target}`);
 
     // Check for existing exploits
     const exploits = await require('./exploit/exploit-research.service').researchRCEExploits(target, vulnerability);
@@ -146,7 +174,7 @@ async function attemptRCE(target, vulnerability) {
       // Try existing exploits first
       for (const exploit of exploits.exploits.slice(0, 3)) {
         // Download and execute exploit if possible
-        console.log(`[Scanner] Trying exploit: ${exploit.title || exploit.url}`);
+        logger.tool('Exploit', `Trying ${exploit.title || exploit.url}`);
       }
     }
 
@@ -195,7 +223,7 @@ async function attemptRCE(target, vulnerability) {
       message: 'RCE attempt failed',
     };
   } catch (error) {
-    console.error('Error attempting RCE:', error);
+    logger.error('Error attempting RCE:', error);
     return {
       success: false,
       error: error.message,
@@ -314,7 +342,7 @@ async function runFullScan(target, goal = 'rce') {
 
     return scanResults;
   } catch (error) {
-    console.error('Error in full scan:', error);
+    logger.error('Error in full scan:', error);
     return {
       ...scanResults,
       error: error.message,

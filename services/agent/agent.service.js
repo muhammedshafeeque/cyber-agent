@@ -4,6 +4,8 @@ const planningService = require('./planning.service');
 const memoryService = require('./memory.service');
 const scannerService = require('../scanner.service');
 const { chat } = require('../../config/mistral.config');
+const logger = require('../../cli/utils/logger');
+const chalk = require('chalk');
 
 class AutonomousAgent {
   constructor(target, options = {}) {
@@ -19,7 +21,7 @@ class AutonomousAgent {
       this.state.setPhase('reconnaissance');
       await this.executePhase();
     } catch (error) {
-      console.error('Agent error:', error);
+      logger.error('Agent error:', error);
       throw error;
     }
   }
@@ -56,39 +58,56 @@ class AutonomousAgent {
   }
 
   async reconnaissancePhase() {
-    console.log('[Agent] Starting reconnaissance phase...');
+    logger.phase('RECONNAISSANCE', `Target: ${this.state.target}`);
     
     // Check knowledge graph for existing information
+    logger.step('Checking knowledge graph for existing reconnaissance data...');
     const existingInfo = await memoryService.retrieveContext(this.state.target);
     
     if (!existingInfo || existingInfo.length === 0) {
+      logger.step('No existing data found. Running initial reconnaissance scans...');
       // Run initial scans
       const scanResults = await scannerService.runReconnaissance(this.state.target);
+      
+      if (scanResults && scanResults.parsed) {
+        logger.scanResult('Reconnaissance', {
+          success: true,
+          vulnerabilities: scanResults.parsed.vulnerabilities || [],
+          ports: scanResults.parsed.ports || [],
+          services: scanResults.parsed.services || [],
+        });
+      }
+      
       this.state.addScanResult(scanResults);
       
       // Store in memory
+      logger.step('Storing reconnaissance results in knowledge graph...');
       await memoryService.storeContext(this.state.target, 'reconnaissance', scanResults);
+      logger.success('Reconnaissance phase completed');
     } else {
-      console.log('[Agent] Using existing reconnaissance data');
+      logger.info('Using existing reconnaissance data from knowledge graph');
       this.state.addScanResult(existingInfo);
     }
 
+    logger.step(`Moving to vulnerability discovery phase... (Step ${this.state.currentStep + 1})`);
     this.state.setPhase('vulnerability_discovery');
     this.state.incrementStep();
   }
 
   async vulnerabilityDiscoveryPhase() {
-    console.log('[Agent] Starting vulnerability discovery phase...');
+    logger.phase('VULNERABILITY DISCOVERY', `Step ${this.state.currentStep}`);
     
     const scanResults = this.state.scanResults[this.state.scanResults.length - 1];
     
     // Use AI to decide which tools to run
+    logger.step('AI analyzing context to decide next actions...');
     const decision = await decisionService.decideNextAction(
       this.state,
       'vulnerability_discovery',
       scanResults
     );
 
+    logger.decision(decision.action, decision.reasoning);
     this.state.recordDecision(decision.action, decision.reasoning);
 
     // Ensure recommendedTools is an array of strings
@@ -101,21 +120,45 @@ class AutonomousAgent {
       }
     }
     
+    if (recommendedTools.length > 0) {
+      logger.info(`Executing ${recommendedTools.length} tools: ${recommendedTools.join(', ')}`);
+    } else {
+      logger.warn('No tools recommended. Using default scan tools.');
+      recommendedTools = ['nmap', 'nikto']; // Default tools
+    }
+    
     // Execute vulnerability scans
+    logger.separator();
     const vulnResults = await scannerService.runVulnerabilityScans(
       this.state.target,
       recommendedTools
     );
 
+    if (vulnResults && Array.isArray(vulnResults)) {
+      vulnResults.forEach(result => {
+        if (result.tool) {
+          logger.scanResult(result.tool, result);
+        }
+      });
+    }
+
     this.state.addScanResult(vulnResults);
     
     // Extract vulnerabilities
+    logger.step('Analyzing scan results for vulnerabilities...');
     const vulnerabilities = await this.extractVulnerabilities(vulnResults);
-    vulnerabilities.forEach(v => this.state.addVulnerability(v));
-
+    
     if (vulnerabilities.length > 0) {
+      logger.success(`Found ${vulnerabilities.length} vulnerability(ies):`);
+      vulnerabilities.forEach(v => {
+        logger.vulnerability(v);
+        this.state.addVulnerability(v);
+      });
+      logger.step('Moving to research phase to gather exploit information...');
       this.state.setPhase('research');
     } else {
+      logger.info('No vulnerabilities found in this scan.');
+      logger.step('Moving to analysis phase...');
       this.state.setPhase('analysis');
     }
     
@@ -123,13 +166,24 @@ class AutonomousAgent {
   }
 
   async researchPhase() {
-    console.log('[Agent] Starting research phase...');
+    logger.phase('RESEARCH', `Analyzing ${this.state.discoveredVulnerabilities.length} vulnerabilities`);
     
     const vulnerabilities = this.state.discoveredVulnerabilities;
     
     // Research each vulnerability
-    for (const vuln of vulnerabilities) {
+    logger.step(`Researching ${vulnerabilities.length} discovered vulnerabilities...`);
+    for (let i = 0; i < vulnerabilities.length; i++) {
+      const vuln = vulnerabilities[i];
+      logger.info(`Researching vulnerability ${i + 1}/${vulnerabilities.length}: ${vuln.type}`);
+      
       const researchResults = await decisionService.researchVulnerability(vuln);
+      
+      if (researchResults && researchResults.exploits) {
+        logger.info(`  Found ${researchResults.exploits.length} potential exploit(s)`);
+      }
+      if (researchResults && researchResults.tools) {
+        logger.info(`  Recommended tools: ${researchResults.tools.join(', ')}`);
+      }
       
       // Store research results
       await memoryService.storeResearch(vuln, researchResults);
@@ -144,9 +198,18 @@ class AutonomousAgent {
       v.type.toLowerCase().includes('deserialization')
     );
 
-    if (rceOpportunities.length > 0 && this.state.rceGoal) {
-      this.state.setPhase('exploitation');
+    if (rceOpportunities.length > 0) {
+      logger.success(`Identified ${rceOpportunities.length} RCE opportunity(ies)`);
+      if (this.state.rceGoal) {
+        logger.step('Moving to exploitation phase...');
+        this.state.setPhase('exploitation');
+      } else {
+        logger.step('RCE goal not enabled. Moving to tool installation...');
+        this.state.setPhase('tool_installation');
+      }
     } else {
+      logger.info('No direct RCE opportunities found.');
+      logger.step('Moving to tool installation phase...');
       this.state.setPhase('tool_installation');
     }
 
@@ -154,52 +217,106 @@ class AutonomousAgent {
   }
 
   async toolInstallationPhase() {
-    console.log('[Agent] Starting tool installation phase...');
+    logger.phase('TOOL INSTALLATION', `Preparing tools for exploitation`);
     
+    logger.step('AI determining required tools...');
     const decision = await decisionService.decideToolsNeeded(this.state);
     const toolsNeeded = decision.tools || [];
 
-    for (const toolName of toolsNeeded) {
+    if (toolsNeeded.length === 0) {
+      logger.info('No additional tools needed.');
+    } else {
+      logger.info(`Installing/checking ${toolsNeeded.length} tool(s): ${toolsNeeded.join(', ')}`);
+    }
+
+    for (let i = 0; i < toolsNeeded.length; i++) {
+      const toolName = toolsNeeded[i];
+      logger.tool('Install', `Checking ${toolName}`, `(${i + 1}/${toolsNeeded.length})`);
+      
       // Check if tool exists, install if needed
       const toolStatus = await this.checkAndInstallTool(toolName);
       if (toolStatus.installed || toolStatus.available) {
+        logger.success(`${toolName} ${toolStatus.installed ? 'installed' : 'available'}`);
         this.state.addTool(toolStatus);
+      } else {
+        logger.warn(`${toolName} not available and could not be installed`);
       }
     }
 
+    logger.step('Moving to exploitation phase...');
     this.state.setPhase('exploitation');
     this.state.incrementStep();
   }
 
   async exploitationPhase() {
-    console.log('[Agent] Starting exploitation phase...');
+    logger.phase('EXPLOITATION', 'Attempting RCE');
     
-    const vulnerabilities = this.state.discoveredVulnerabilities;
+    const vulnerabilities = this.state.discoveredVulnerabilities.filter(v => 
+      this.canLeadToRCE(v)
+    );
     
-    for (const vuln of vulnerabilities) {
-      if (this.state.rceGoal && this.canLeadToRCE(vuln)) {
+    if (vulnerabilities.length === 0) {
+      logger.warn('No RCE-capable vulnerabilities found for exploitation.');
+      this.state.setPhase('analysis');
+      this.state.incrementStep();
+      return;
+    }
+    
+    logger.info(`Attempting exploitation on ${vulnerabilities.length} vulnerability(ies)...`);
+    
+    for (let i = 0; i < vulnerabilities.length; i++) {
+      const vuln = vulnerabilities[i];
+      logger.tool('Exploit', `Attempting RCE via ${vuln.type}`, `(${i + 1}/${vulnerabilities.length})`);
+      
+      if (this.state.rceGoal) {
         const exploitResult = await scannerService.attemptRCE(this.state.target, vuln);
         
         if (exploitResult.success) {
           this.state.setRCEAchieved(true);
-          console.log('[Agent] RCE achieved!');
+          logger.success('🎯 RCE ACHIEVED!', exploitResult);
+          logger.separator();
           break;
+        } else {
+          logger.warn(`Exploitation attempt ${i + 1} failed: ${exploitResult.error || 'Unknown error'}`);
         }
       }
     }
 
+    if (!this.state.rceAchieved) {
+      logger.info('RCE not achieved in this phase.');
+    }
+    
+    logger.step('Moving to analysis phase...');
     this.state.setPhase('analysis');
     this.state.incrementStep();
   }
 
   async analysisPhase() {
-    console.log('[Agent] Starting analysis phase...');
+    logger.phase('ANALYSIS', `Step ${this.state.currentStep}`);
     
+    logger.info(`Current status:
+  - Vulnerabilities found: ${this.state.discoveredVulnerabilities.length}
+  - Tools installed: ${this.state.installedTools.length}
+  - RCE Goal: ${this.state.rceGoal ? 'Yes' : 'No'}
+  - RCE Achieved: ${this.state.rceAchieved ? chalk.green('YES ✓') : chalk.red('No ✗')}
+  - Total steps: ${this.state.currentStep}`);
+    
+    logger.step('AI analyzing current state and deciding next steps...');
     const analysis = await decisionService.analyzeCurrentState(this.state);
     
+    if (analysis.recommendation) {
+      logger.info(`AI Recommendation: ${analysis.recommendation.substring(0, 300)}`);
+    }
+    
     if (analysis.shouldContinue && !this.state.rceAchieved) {
+      logger.step('Continuing testing. Moving back to vulnerability discovery...');
+      logger.separator();
       this.state.setPhase('vulnerability_discovery');
     } else {
+      logger.success('Testing cycle complete.');
+      if (this.state.rceAchieved) {
+        logger.success('🎯 RCE Goal Achieved!');
+      }
       this.state.setPhase('complete');
     }
 
@@ -272,4 +389,5 @@ class AutonomousAgent {
 }
 
 module.exports = AutonomousAgent;
+
 
